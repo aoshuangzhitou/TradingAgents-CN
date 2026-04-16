@@ -123,24 +123,46 @@ class FavoritesService:
         if codes:
             try:
                 coll = db["market_quotes"]
-                cursor = coll.find({"code": {"$in": codes}}, {"code": 1, "close": 1, "pct_chg": 1, "amount": 1})
+                # 🔥 兼容处理：code可能是字符串或数字，统一转为字符串查询
+                code_queries = []
+                for c in codes:
+                    try:
+                        # 尝试作为数字查询（兼容Tushare等存储为数字的情况）
+                        code_num = int(c)
+                        code_queries.append(code_num)
+                    except ValueError:
+                        pass
+                    code_queries.append(c)  # 同时保留字符串形式
+
+                cursor = coll.find({"code": {"$in": code_queries}}, {"code": 1, "close": 1, "pct_chg": 1, "amount": 1})
                 docs = await cursor.to_list(length=None)
-                quotes_map = {str(d.get("code")).zfill(6): d for d in (docs or [])}
+                # 统一key为6位字符串格式
+                quotes_map = {}
+                for d in (docs or []):
+                    code_raw = d.get("code")
+                    if code_raw is not None:
+                        code_key = str(int(code_raw)).zfill(6) if isinstance(code_raw, (int, float)) else str(code_raw).zfill(6)
+                        quotes_map[code_key] = d
                 for it in items:
                     code = it.get("stock_code")
-                    q = quotes_map.get(code)
-                    if q:
-                        it["current_price"] = q.get("close")
-                        it["change_percent"] = q.get("pct_chg")
+                    if code:
+                        code_key = str(int(code)).zfill(6) if code.isdigit() else code
+                        q = quotes_map.get(code_key)
+                        if q:
+                            it["current_price"] = q.get("close")
+                            it["change_percent"] = q.get("pct_chg")
                 # 兜底：对未命中的代码使用在线源补齐（可选）
-                missing = [c for c in codes if c not in quotes_map]
+                # 注意：现在 quotes_map 的 key 是6位字符串格式
+                missing = [c for c in codes if (str(int(c)).zfill(6) if c.isdigit() else c) not in quotes_map]
                 if missing:
                     try:
                         quotes_online = await get_quotes_service().get_quotes(missing)
                         for it in items:
                             code = it.get("stock_code")
-                            if it.get("current_price") is None:
-                                q2 = quotes_online.get(code, {}) if quotes_online else {}
+                            if code and it.get("current_price") is None:
+                                # 统一key格式进行查询
+                                code_key = str(int(code)).zfill(6) if code.isdigit() else code
+                                q2 = quotes_online.get(code_key, {}) if quotes_online else {}
                                 it["current_price"] = q2.get("close")
                                 it["change_percent"] = q2.get("pct_chg")
                     except Exception:

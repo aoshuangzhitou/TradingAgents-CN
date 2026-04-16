@@ -234,7 +234,26 @@ async def _get_last_price(code: str, market: str) -> Optional[float]:
             except Exception as e:
                 logger.warning(f"⚠️ stock_basic_info 价格转换失败 {code}: {e}")
 
-        logger.error(f"❌ 无法从数据库获取A股价格: {code}")
+        # 3. 🔥 回退到 AKShare 实时行情（东方财富 spot 接口）
+        try:
+            from app.services.quotes_service import get_quotes_service
+            quotes_service = get_quotes_service()
+
+            # 标准化代码格式（补齐到6位）
+            normalized_code = code.strip().zfill(6)
+
+            quotes = await quotes_service.get_quotes([normalized_code])
+            if quotes and normalized_code in quotes:
+                quote_data = quotes[normalized_code]
+                if quote_data and quote_data.get("close"):
+                    price = float(quote_data["close"])
+                    if price > 0:
+                        logger.info(f"✅ 从 AKShare 实时行情获取价格: {code} = {price}")
+                        return price
+        except Exception as e:
+            logger.warning(f"⚠️ AKShare 实时行情获取失败 {code}: {e}")
+
+        logger.error(f"❌ 无法获取A股价格: {code}（数据库和AKShare均失败）")
         return None
 
     # 港股/美股：使用 ForeignStockService

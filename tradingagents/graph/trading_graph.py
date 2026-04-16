@@ -844,6 +844,8 @@ class TradingAgentsGraph:
                 [
                     # 统一工具（推荐）
                     self.toolkit.get_stock_news_unified,
+                    # 宏观新闻工具
+                    self.toolkit.get_macro_market_news,
                     # 在线工具（备用）
                     self.toolkit.get_global_news_openai,
                     self.toolkit.get_google_news,

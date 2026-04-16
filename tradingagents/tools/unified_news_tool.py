@@ -367,10 +367,72 @@ class UnifiedNewsAnalyzer:
     def _get_hk_share_news(self, stock_code: str, max_news: int, model_info: str = "") -> str:
         """获取港股新闻"""
         logger.info(f"[统一新闻工具] 获取港股 {stock_code} 新闻")
-        
+
         # 获取当前日期
         curr_date = datetime.now().strftime("%Y-%m-%d")
-        
+
+        # 🔥 新增：标准化港股代码（去除.HK后缀，补齐5位）
+        clean_code = stock_code.replace('.HK', '').replace('.hk', '')
+        if len(clean_code) == 4:
+            clean_code = '0' + clean_code
+        logger.info(f"[统一新闻工具] 标准化港股代码: {stock_code} -> {clean_code}")
+
+        # 🔥 优先级0: AKShare 东方财富新闻（实测支持港股代码）
+        try:
+            logger.info(f"[统一新闻工具] 🔍 尝试AKShare东方财富港股新闻...")
+            import akshare as ak
+
+            news_df = ak.stock_news_em(symbol=clean_code)
+
+            if news_df is not None and not news_df.empty:
+                logger.info(f"[统一新闻工具] ✅ AKShare东方财富获取到 {len(news_df)} 条港股新闻")
+
+                # 格式化新闻内容
+                news_items = []
+                for _, row in news_df.head(max_news).iterrows():
+                    title = row.get('新闻标题', '') or row.get('标题', '')
+                    content = row.get('新闻内容', '') or row.get('内容', '')
+                    time = row.get('发布时间', '') or row.get('时间', '')
+                    source = row.get('文章来源', '') or row.get('来源', '')
+                    url = row.get('新闻链接', '') or row.get('链接', '')
+
+                    if title:
+                        news_item = f"- **{title}**"
+                        if time:
+                            news_item += f" [{time}]"
+                        if source:
+                            news_item += f" 来源: {source}"
+                        if url:
+                            news_item += f" [链接]({url})"
+                        if content and len(content) > 50:
+                            news_item += f"\n  内容摘要: {content[:200]}..."
+                        news_items.append(news_item)
+
+                if news_items:
+                    formatted_news = "\n\n".join(news_items)
+                    result = f"""# {stock_code} 港股新闻 (东方财富)
+
+**数据源**: AKShare 东方财富
+**股票代码**: {stock_code}
+**新闻数量**: {len(news_items)} 条
+**获取时间**: {curr_date}
+
+---
+
+{formatted_news}
+
+---
+*数据来源: 东方财富网 (通过AKShare)*
+"""
+                    return self._format_news_result(result, "AKShare东方财富港股新闻", model_info)
+                else:
+                    logger.warning(f"[统一新闻工具] ⚠️ AKShare东方财富新闻格式化失败")
+            else:
+                logger.warning(f"[统一新闻工具] ⚠️ AKShare东方财富返回空数据")
+
+        except Exception as e:
+            logger.warning(f"[统一新闻工具] AKShare东方财富港股新闻获取失败: {e}")
+
         # 优先级1: Google新闻（港股搜索）
         try:
             if hasattr(self.toolkit, 'get_google_news'):
@@ -383,7 +445,7 @@ class UnifiedNewsAnalyzer:
                     return self._format_news_result(result, "Google港股新闻", model_info)
         except Exception as e:
             logger.warning(f"[统一新闻工具] Google港股新闻获取失败: {e}")
-        
+
         # 优先级2: OpenAI全球新闻
         try:
             if hasattr(self.toolkit, 'get_global_news_openai'):
@@ -395,7 +457,7 @@ class UnifiedNewsAnalyzer:
                     return self._format_news_result(result, "OpenAI港股新闻", model_info)
         except Exception as e:
             logger.warning(f"[统一新闻工具] OpenAI港股新闻获取失败: {e}")
-        
+
         # 优先级3: 实时新闻（如果支持港股）
         try:
             if hasattr(self.toolkit, 'get_realtime_stock_news'):
@@ -407,7 +469,7 @@ class UnifiedNewsAnalyzer:
                     return self._format_news_result(result, "实时港股新闻", model_info)
         except Exception as e:
             logger.warning(f"[统一新闻工具] 实时港股新闻获取失败: {e}")
-        
+
         return "❌ 无法获取港股新闻数据，所有新闻源均不可用"
     
     def _get_us_share_news(self, stock_code: str, max_news: int, model_info: str = "") -> str:

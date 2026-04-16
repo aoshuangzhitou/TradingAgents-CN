@@ -1,9 +1,15 @@
+import os
+
+# 强制 HuggingFace 使用本地缓存，避免远程检查超时
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"  # 国内镜像（离线模式下不使用）
+os.environ["HF_HOME"] = os.path.expanduser("~/.cache/huggingface")  # 明确缓存路径
 import chromadb
 from chromadb.config import Settings
 from openai import OpenAI
 import dashscope
 from dashscope import TextEmbedding
-import os
 import threading
 import hashlib
 from typing import Dict, Optional
@@ -104,12 +110,70 @@ class FinancialSituationMemory:
         # 配置向量缓存的长度限制（向量缓存默认启用长度检查）
         self.max_embedding_length = int(os.getenv('MAX_EMBEDDING_CONTENT_LENGTH', '50000'))  # 默认50K字符
         self.enable_embedding_length_check = os.getenv('ENABLE_EMBEDDING_LENGTH_CHECK', 'true').lower() == 'true'  # 向量缓存默认启用
-        
-        # 根据LLM提供商选择嵌入模型和客户端
-        # 初始化降级选项标志
-        self.fallback_available = False
-        
-        if self.llm_provider == "dashscope" or self.llm_provider == "alibaba":
+
+        # 🔥 优先检查是否使用本地 embedding（独立于 LLM 提供商）
+        embedding_provider = os.getenv('EMBEDDING_PROVIDER', '').lower()
+
+        if embedding_provider == "chroma":
+            # 使用本地 Chroma Embedding (bge-base-zh-v1.5, 768维)
+            try:
+                # 直接使用 sentence_transformers 加载模型（更好地支持离线模式）
+                from sentence_transformers import SentenceTransformer
+
+                self.embedding_provider = "chroma"
+                self.embedding = "bge-base-zh-v1.5"
+                self.client = "LOCAL"
+
+                # 直接加载本地模型，绕过 ChromaDB 的远程检查
+                model_cache_path = os.path.expanduser(
+                    "~/.cache/huggingface/hub/models--BAAI--bge-base-zh-v1.5/snapshots"
+                )
+
+                # 尝试从本地缓存加载
+                if os.path.exists(model_cache_path):
+                    # 找到最新的 snapshot
+                    snapshots = os.listdir(model_cache_path)
+                    if snapshots:
+                        local_model_path = os.path.join(model_cache_path, snapshots[0])
+                        logger.info(f"📁 从本地缓存加载: {local_model_path}")
+                        self._embedding_model = SentenceTransformer(local_model_path)
+                    else:
+                        # 缓存目录存在但没有 snapshot，使用默认方式（会检查离线模式）
+                        self._embedding_model = SentenceTransformer(
+                            "BAAI/bge-base-zh-v1.5",
+                            cache_folder=os.environ.get("HF_HOME")
+                        )
+                else:
+                    # 缓存不存在，使用默认方式下载
+                    self._embedding_model = SentenceTransformer(
+                        "BAAI/bge-base-zh-v1.5",
+                        cache_folder=os.environ.get("HF_HOME")
+                    )
+
+                # 测试模型是否正常工作
+                test_embedding = self._embedding_model.encode("测试")
+                logger.info(f"✅ 本地 Chroma Embedding 已配置: {self.embedding} (维度: {len(test_embedding)})")
+            except ImportError as e:
+                logger.error(f"❌ sentence-transformers 包未安装: {e}")
+                self.embedding_provider = self.llm_provider
+                self.client = "DISABLED"
+                logger.warning(f"⚠️ 本地 embedding 功能已禁用，将使用 LLM 提供商的 embedding")
+            except Exception as e:
+                logger.error(f"❌ 本地 embedding 初始化失败: {e}")
+                self.embedding_provider = self.llm_provider
+                self.client = "DISABLED"
+                logger.warning(f"⚠️ 本地 embedding 功能已禁用，将使用 LLM 提供商的 embedding")
+        else:
+            self.embedding_provider = self.llm_provider
+            # 根据LLM提供商选择嵌入模型和客户端
+            # 初始化降级选项标志
+            self.fallback_available = False
+
+        # 🔥 如果已经配置了本地 chroma embedding，跳过 LLM provider 的 embedding 配置
+        if getattr(self, 'embedding_provider', None) == "chroma" and self.client == "LOCAL":
+            # 本地 embedding 已就绪，只需初始化 ChromaDB manager
+            pass
+        elif self.llm_provider == "dashscope" or self.llm_provider == "alibaba":
             self.embedding = "text-embedding-v3"
             self.client = None  # DashScope不需要OpenAI客户端
 
@@ -351,21 +415,38 @@ class FinancialSituationMemory:
     def get_embedding(self, text):
         """Get embedding for a text using the configured provider"""
 
+        # 根据提供商确定空向量维度
+        empty_dim = 768 if getattr(self, 'embedding_provider', self.llm_provider) == "chroma" else 1024
+
+        # 优先处理本地 chroma embedding
+        if getattr(self, 'embedding_provider', None) == "chroma":
+            if self.client == "DISABLED":
+                logger.debug(f"⚠️ 本地 embedding 功能已禁用，返回空向量")
+                return [0.0] * empty_dim
+            try:
+                # 使用直接加载的 SentenceTransformer 模型
+                embedding = self._embedding_model.encode(text).tolist()
+                logger.debug(f"✅ 本地 embedding 成功，维度: {len(embedding)}")
+                return embedding
+            except Exception as e:
+                logger.error(f"❌ 本地 embedding 失败: {e}")
+                return [0.0] * empty_dim
+
         # 检查记忆功能是否被禁用
         if self.client == "DISABLED":
             # 内存功能已禁用，返回空向量
             logger.debug(f"⚠️ 记忆功能已禁用，返回空向量")
-            return [0.0] * 1024  # 返回1024维的零向量
+            return [0.0] * empty_dim
 
         # 验证输入文本
         if not text or not isinstance(text, str):
             logger.warning(f"⚠️ 输入文本为空或无效，返回空向量")
-            return [0.0] * 1024
+            return [0.0] * empty_dim
 
         text_length = len(text)
         if text_length == 0:
             logger.warning(f"⚠️ 输入文本长度为0，返回空向量")
-            return [0.0] * 1024
+            return [0.0] * empty_dim
         
         # 检查是否启用长度限制
         if self.enable_embedding_length_check and text_length > self.max_embedding_length:
@@ -380,7 +461,7 @@ class FinancialSituationMemory:
                 'strategy': 'length_limit_skip',
                 'max_length': self.max_embedding_length
             }
-            return [0.0] * 1024
+            return [0.0] * empty_dim
         
         # 记录文本信息（不进行任何截断）
         if text_length > 8192:
@@ -411,7 +492,7 @@ class FinancialSituationMemory:
                 # 检查DashScope API密钥是否可用
                 if not hasattr(dashscope, 'api_key') or not dashscope.api_key:
                     logger.warning(f"⚠️ DashScope API密钥未设置，记忆功能降级")
-                    return [0.0] * 1024  # 返回空向量
+                    return [0.0] * empty_dim  # 返回空向量
 
                 # 尝试调用DashScope API
                 response = TextEmbedding.call(
@@ -447,13 +528,13 @@ class FinancialSituationMemory:
                             except Exception as fallback_error:
                                 logger.error(f"❌ OpenAI降级失败: {str(fallback_error)}")
                                 logger.info(f"💡 所有降级选项失败，记忆功能降级")
-                                return [0.0] * 1024
+                                return [0.0] * empty_dim
                         else:
                             logger.info(f"💡 无可用降级选项，记忆功能降级")
-                            return [0.0] * 1024
+                            return [0.0] * empty_dim
                     else:
                         logger.error(f"❌ DashScope API错误: {error_msg}")
-                        return [0.0] * 1024  # 返回空向量而不是抛出异常
+                        return [0.0] * empty_dim  # 返回空向量而不是抛出异常
 
             except Exception as e:
                 error_str = str(e).lower()
@@ -476,10 +557,10 @@ class FinancialSituationMemory:
                         except Exception as fallback_error:
                             logger.error(f"❌ OpenAI降级失败: {str(fallback_error)}")
                             logger.info(f"💡 所有降级选项失败，记忆功能降级")
-                            return [0.0] * 1024
+                            return [0.0] * empty_dim
                     else:
                         logger.info(f"💡 无可用降级选项，记忆功能降级")
-                        return [0.0] * 1024
+                        return [0.0] * empty_dim
                 elif 'import' in error_str:
                     logger.error(f"❌ DashScope包未安装: {str(e)}")
                 elif 'connection' in error_str:
@@ -490,16 +571,16 @@ class FinancialSituationMemory:
                     logger.error(f"❌ DashScope embedding异常: {str(e)}")
                 
                 logger.warning(f"⚠️ 记忆功能降级，返回空向量")
-                return [0.0] * 1024
+                return [0.0] * empty_dim
         else:
             # 使用OpenAI兼容的嵌入模型
             if self.client is None:
                 logger.warning(f"⚠️ 嵌入客户端未初始化，返回空向量")
-                return [0.0] * 1024  # 返回空向量
+                return [0.0] * empty_dim  # 返回空向量
             elif self.client == "DISABLED":
                 # 内存功能已禁用，返回空向量
                 logger.debug(f"⚠️ 内存功能已禁用，返回空向量")
-                return [0.0] * 1024  # 返回1024维的零向量
+                return [0.0] * empty_dim  # 返回1024维的零向量
 
             # 尝试调用OpenAI兼容的embedding API
             try:
@@ -540,7 +621,7 @@ class FinancialSituationMemory:
                         logger.error(f"❌ {self.llm_provider} embedding异常: {str(e)}")
                 
                 logger.warning(f"⚠️ 记忆功能降级，返回空向量")
-                return [0.0] * 1024
+                return [0.0] * empty_dim
 
     def get_embedding_config_status(self):
         """获取向量缓存配置状态"""

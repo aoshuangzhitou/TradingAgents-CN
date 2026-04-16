@@ -45,6 +45,30 @@ enabled = false  # 默认关闭，生产环境可启用
 level = "INFO"
 directory = "./logs"
 
+# 主日志文件（tradingagents.log）- CLI和分析运行时使用
+[logging.handlers.main]
+enabled = true
+level = "INFO"
+max_size = "50MB"  # 主日志文件稍大，因为包含详细分析过程
+backup_count = 5
+filename = "tradingagents.log"
+
+# WebAPI日志文件 - FastAPI后端使用
+[logging.handlers.webapi]
+enabled = true
+level = "DEBUG"
+max_size = "20MB"  # Web日志适中大小
+backup_count = 5
+filename = "webapi.log"
+
+# Worker日志文件 - 后台任务使用
+[logging.handlers.worker]
+enabled = true
+level = "DEBUG"
+max_size = "20MB"
+backup_count = 3
+filename = "worker.log"
+
 # 特定日志器配置
 [logging.loggers]
 

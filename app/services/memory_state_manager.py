@@ -255,6 +255,11 @@ class MemoryStateManager:
             else:
                 logger.debug(f"❌ 未找到任务: {task_id}")
             return task
+
+    async def get_all_tasks(self) -> List[TaskState]:
+        """获取所有任务状态对象列表（用于防重检查）"""
+        with self._lock:
+            return list(self._tasks.values())
     
     async def get_task_dict(self, task_id: str) -> Optional[Dict[str, Any]]:
         """获取任务状态（字典格式）"""

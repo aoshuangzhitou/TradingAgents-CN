@@ -55,6 +55,7 @@ dependencies = [
     "langchain-openai>=0.3.23",
     "langgraph>=0.4.8",
     "openai>=1.0.0,<2.0.0",
+    "sentence-transformers>=2.2.0",  # 本地 embedding 支持
 
     # 数据处理和分析
     "pandas>=2.3.0",

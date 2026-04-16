@@ -27,7 +27,7 @@ services:
       # 应用会在首次运行时自动创建所需的集合和索引
     environment:
       MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: tradingagents123
+      MONGO_INITDB_ROOT_PASSWORD: Chenghongjulv
       MONGO_INITDB_DATABASE: tradingagents
       TZ: "Asia/Shanghai"
     networks:
@@ -50,11 +50,11 @@ services:
       - tradingagents_redis_data:/data
     environment:
       TZ: "Asia/Shanghai"
-    command: redis-server --appendonly yes --requirepass tradingagents123
+    command: redis-server --appendonly yes --requirepass Chenghongjulv
     networks:
       - tradingagents-network
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "tradingagents123", "ping"]
+      test: ["CMD", "redis-cli", "-a", "Chenghongjulv", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -90,17 +90,17 @@ services:
       MONGODB_HOST: "mongodb"
       MONGODB_PORT: "27017"
       MONGODB_USERNAME: "admin"
-      MONGODB_PASSWORD: "tradingagents123"
+      MONGODB_PASSWORD: "Chenghongjulv"
       MONGODB_DATABASE: "tradingagents"
       MONGODB_AUTH_SOURCE: "admin"
       # 注意：authSource=admin 表示在 admin 数据库中验证用户
-      MONGODB_URL: "mongodb://admin:tradingagents123@mongodb:27017/tradingagents?authSource=admin"
-      MONGODB_CONNECTION_STRING: "mongodb://admin:tradingagents123@mongodb:27017/tradingagents?authSource=admin"
+      MONGODB_URL: "mongodb://admin:Chenghongjulv@mongodb:27017/tradingagents?authSource=admin"
+      MONGODB_CONNECTION_STRING: "mongodb://admin:Chenghongjulv@mongodb:27017/tradingagents?authSource=admin"
       # Redis配置
       REDIS_HOST: "redis"
       REDIS_PORT: "6379"
-      REDIS_PASSWORD: "tradingagents123"
-      REDIS_URL: "redis://:tradingagents123@redis:6379/0"
+      REDIS_PASSWORD: "Chenghongjulv"
+      REDIS_URL: "redis://:Chenghongjulv@redis:6379/0"
       DOCKER_CONTAINER: "true"
       # 安全配置
       JWT_SECRET: "docker-jwt-secret-key-change-in-production-2024"

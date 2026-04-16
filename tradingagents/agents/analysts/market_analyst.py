@@ -349,9 +349,22 @@ def create_market_analyst(llm, toolkit):
                         )
                         tool_messages.append(tool_message)
 
-                    # 基于工具结果生成完整分析报告
-                    # 🔥 重要：这里必须包含公司名称和输出格式要求，确保LLM生成正确的报告标题
-                    analysis_prompt = f"""现在请基于上述工具获取的数据，生成详细的技术分析报告。
+                    # 🔥 增强错误处理：检测数据获取失败，防止LLM幻觉
+                    combined_tool_result = "".join([tm.content for tm in tool_messages])
+                    is_data_failed = _detect_data_fetch_failure(combined_tool_result)
+
+                    if is_data_failed:
+                        # 数据获取失败，使用专门的错误处理prompt
+                        logger.warning(f"⚠️ [市场分析师] 检测到数据获取失败，使用错误处理prompt")
+                        analysis_prompt = _create_error_analysis_prompt(
+                            ticker=ticker,
+                            company_name=company_name,
+                            market_info=market_info,
+                            error_content=combined_tool_result
+                        )
+                    else:
+                        # 数据正常，使用标准分析prompt
+                        analysis_prompt = f"""现在请基于上述工具获取的数据，生成详细的技术分析报告。
 
 **分析对象：**
 - 公司名称：{company_name}
@@ -505,3 +518,177 @@ def create_market_analyst(llm, toolkit):
             }
 
     return market_analyst_node
+
+
+# ==================== 数据获取错误处理辅助函数 ====================
+
+def _detect_data_fetch_failure(tool_result: str) -> bool:
+    """
+    检测工具返回数据是否包含获取失败的标记
+
+    Args:
+        tool_result: 工具返回的字符串内容
+
+    Returns:
+        bool: True 表示数据获取失败，需要特殊处理
+    """
+    if not tool_result:
+        return True
+
+    # 检查明确的失败标记
+    failure_markers = [
+        "DATA_FETCH_FAILED",
+        "数据获取失败",
+        "❌",
+        "获取失败",
+        "无法获取",
+        "所有启用的数据源都不可用",
+        "返回空数据",
+        "未获取到数据",
+        "不存在",
+        "无数据",
+        "数据为空",
+        "工具执行失败",
+        "Exception:",
+        "Error:",
+    ]
+
+    for marker in failure_markers:
+        if marker in tool_result:
+            logger.info(f"🔴 [错误检测] 发现失败标记: '{marker}'")
+            return True
+
+    # 检查是否有实际的价格数据（最低限度的有效数据）
+    import re
+    price_patterns = [
+        r'(最新价|当前价|收盘价)[：:][\s]*[\d]+',  # 价格标签+数字
+        r'[¥$HK][\s]*[\d]+[\.\d]*',  # 货币符号+数字
+    ]
+
+    has_price = False
+    for pattern in price_patterns:
+        if re.search(pattern, tool_result):
+            has_price = True
+            break
+
+    # 如果有失败标记但没有实际价格数据，认为是失败
+    if not has_price:
+        logger.warning(f"⚠️ [错误检测] 工具结果中没有有效价格数据")
+        return True
+
+    return False
+
+
+def _create_error_analysis_prompt(ticker: str, company_name: str, market_info: dict, error_content: str) -> str:
+    """
+    创建数据获取失败时的专用分析prompt
+    明确告知LLM不要编造数据，输出失败状态报告
+
+    Args:
+        ticker: 股票代码
+        company_name: 公司名称
+        market_info: 市场信息字典
+        error_content: 错误详情内容
+
+    Returns:
+        str: 格式化的错误处理prompt
+    """
+    # 提取错误原因（截取前300字符）
+    error_reason = error_content[:300] if len(error_content) > 300 else error_content
+
+    # 根据市场类型给出代码格式建议
+    market_name = market_info.get('market_name', '未知市场')
+    code_format_hint = ""
+    if 'A股' in market_name or '中国' in market_name:
+        code_format_hint = "A股代码格式：6位数字（如 000001、600519）"
+    elif '港股' in market_name or 'HK' in market_name:
+        code_format_hint = "港股代码格式：5位数字（如 00700、09988），也可加 .HK 后缀"
+    elif '美股' in market_name or 'US' in market_name:
+        code_format_hint = "美股代码格式：字母代码（如 AAPL、TSLA）"
+
+    error_prompt = f"""⚠️ **重要：数据获取失败处理**
+
+检测到以下股票的市场数据获取失败：
+- 股票代码：{ticker}
+- 公司名称：{company_name}
+- 所属市场：{market_name}
+- 计价货币：{market_info.get('currency_name', '未知')} ({market_info.get('currency_symbol', '?')})
+
+**错误详情：**
+{error_reason}
+
+---
+
+🔴 **LLM处理规则（必须严格遵守，违反将导致错误输出）：**
+
+1. **绝对禁止编造任何数据**
+   - 禁止编造价格数值（如 "当前价 ¥123.45"）
+   - 禁止编造技术指标数值（如 "MA5=100.50"）
+   - 禁止编造成交量、涨跌幅等任何数值
+
+2. **绝对禁止给出投资建议**
+   - 禁止给出买入/卖出/持有建议
+   - 禁止给出目标价位、止损位
+   - 禁止给出任何交易决策
+
+3. **必须输出的格式**
+
+请严格按照以下格式输出（使用标准Markdown标题）：
+
+# {ticker} 技术分析报告 - 数据获取失败
+
+---
+
+## 一、数据状态
+
+| 项目 | 状态 |
+|------|------|
+| 股票代码 | {ticker} |
+| 公司名称 | {company_name} |
+| 所属市场 | {market_name} |
+| 数据状态 | **获取失败** |
+| 分析状态 | 无法进行技术分析 |
+
+**失败原因：**
+（请从错误详情中提取关键失败原因，不要编造）
+
+---
+
+## 二、排查建议
+
+1. **检查股票代码格式**
+   - {code_format_hint}
+   - 确认当前输入的代码 '{ticker}' 是否符合该格式
+
+2. **确认股票是否在对应市场交易**
+   - 检查该股票代码是否为有效的{market_name}股票
+   - 确认股票是否已退市或停牌
+
+3. **数据源状态**
+   - 建议稍后重试
+   - 如持续失败，请联系系统管理员检查数据源配置
+
+---
+
+## 三、决策建议
+
+⚠️ **重要提醒：**
+
+- **当前不建议进行任何交易决策**
+- 数据获取失败时，任何技术分析都是无效的
+- 请等待数据正常后再进行投资分析
+- 投资决策应基于完整、准确的市场数据
+
+---
+
+## 四、免责声明
+
+本报告因数据获取失败而无法提供有效分析。所有技术分析和投资建议均依赖于准确的实时市场数据。在数据缺失的情况下，任何分析结论都可能存在严重偏差，可能导致投资损失。
+
+---
+
+**再次强调：禁止输出任何具体数值、价格、技术指标数值或投资建议！**
+**如果输出中包含任何编造的数值，将被视为严重错误！**
+"""
+
+    return error_prompt

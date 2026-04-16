@@ -1649,61 +1649,153 @@ class DataSourceManager:
     def _get_akshare_stock_info(self, symbol: str) -> Dict:
         """使用AKShare获取股票基本信息
 
-        🔥 重要：AKShare 需要区分股票和指数
-        - 对于 000001，如果不加后缀，会被识别为"深圳成指"（指数）
-        - 对于股票，需要使用完整代码（如 sz000001 或 sh600000）
+        🔥 重要：需要区分A股、港股、北京股
+        - A股6位数字：需要添加市场前缀（sz/sh）
+        - 港股4-5位数字：使用 stock_hk_spot 接口
+        - 北京股8开头：添加 bj 前缀
+        """
+        try:
+            import akshare as ak
+            import re
+
+            # 🔥 首先判断股票类型
+            symbol_str = str(symbol).strip()
+
+            # 港股判断：4位或5位纯数字（如 01810、00700、9988）
+            if re.match(r'^\d{4,5}$', symbol_str):
+                logger.info(f"🇭🇰 [AKShare股票信息] 检测为港股代码: {symbol}")
+                return self._get_akshare_hk_stock_info(symbol_str)
+
+            # A股判断：6位数字
+            if re.match(r'^\d{6}$', symbol_str):
+                # 🔥 转换为 AKShare 格式的股票代码
+                # AKShare 的 stock_individual_info_em 需要使用 "sz000001" 或 "sh600000" 格式
+                if symbol_str.startswith('6'):
+                    # 上海股票：600000 -> sh600000
+                    akshare_symbol = f"sh{symbol_str}"
+                    market = '上海'
+                elif symbol_str.startswith(('0', '3')):
+                    # 深圳股票：000001 -> sz000001, 300001 -> sz300001
+                    akshare_symbol = f"sz{symbol_str}"
+                    market = '深圳'
+                elif symbol_str.startswith('2'):
+                    # B股：200001 -> sz200001
+                    akshare_symbol = f"sz{symbol_str}"
+                    market = '深圳B股'
+                elif symbol_str.startswith(('8', '4')):
+                    # 北京股票：830000 -> bj830000
+                    akshare_symbol = f"bj{symbol_str}"
+                    market = '北京'
+                else:
+                    # 其他6位数字，尝试作为深圳股票
+                    akshare_symbol = f"sz{symbol_str}"
+                    market = '未知'
+
+                logger.debug(f"📊 [AKShare股票信息] A股代码: {symbol}, 市场: {market}, AKShare格式: {akshare_symbol}")
+
+                # 尝试获取个股信息
+                stock_info = ak.stock_individual_info_em(symbol=akshare_symbol)
+
+                if stock_info is not None and not stock_info.empty:
+                    # 转换为字典格式
+                    info = {'symbol': symbol_str, 'source': 'akshare', 'market': market}
+
+                    # 提取股票名称
+                    name_row = stock_info[stock_info['item'] == '股票简称']
+                    if not name_row.empty:
+                        stock_name = name_row['value'].iloc[0]
+                        info['name'] = stock_name
+                        logger.info(f"✅ [AKShare股票信息] {symbol} -> {stock_name} ({market})")
+                    else:
+                        info['name'] = f'股票{symbol_str}'
+                        logger.warning(f"⚠️ [AKShare股票信息] 未找到股票简称: {symbol}")
+
+                    # 提取其他信息
+                    info['area'] = '未知'
+                    info['industry'] = '未知'
+                    info['list_date'] = '未知'
+
+                    return info
+                else:
+                    logger.warning(f"⚠️ [AKShare股票信息] 返回空数据: {symbol}")
+                    return {'symbol': symbol_str, 'name': f'股票{symbol_str}', 'source': 'akshare', 'market': market}
+
+            # 其他格式（美股等），直接返回默认信息
+            logger.warning(f"⚠️ [AKShare股票信息] 不支持的代码格式: {symbol}")
+            return {'symbol': symbol_str, 'name': f'股票{symbol_str}', 'source': 'akshare', 'error': '不支持的代码格式'}
+
+        except Exception as e:
+            logger.error(f"❌ [股票信息] AKShare获取失败: {symbol}, 错误: {e}")
+            return {'symbol': str(symbol), 'name': f'股票{symbol}', 'source': 'akshare', 'error': str(e)}
+
+    def _get_akshare_hk_stock_info(self, symbol: str) -> Dict:
+        """使用AKShare获取港股基本信息
+
+        Args:
+            symbol: 港股代码（4位或5位纯数字，如 01810、00700）
+
+        Returns:
+            Dict: 港股基本信息
         """
         try:
             import akshare as ak
 
-            # 🔥 转换为 AKShare 格式的股票代码
-            # AKShare 的 stock_individual_info_em 需要使用 "sz000001" 或 "sh600000" 格式
-            if symbol.startswith('6'):
-                # 上海股票：600000 -> sh600000
-                akshare_symbol = f"sh{symbol}"
-            elif symbol.startswith(('0', '3', '2')):
-                # 深圳股票：000001 -> sz000001
-                akshare_symbol = f"sz{symbol}"
-            elif symbol.startswith(('8', '4')):
-                # 北京股票：830000 -> bj830000
-                akshare_symbol = f"bj{symbol}"
-            else:
-                # 其他情况，直接使用原始代码
-                akshare_symbol = symbol
+            logger.info(f"🇭🇰 [AKShare港股信息] 获取港股信息: {symbol}")
 
-            logger.debug(f"📊 [AKShare股票信息] 原始代码: {symbol}, AKShare格式: {akshare_symbol}")
+            # AKShare 的 stock_hk_spot 可以获取港股列表
+            # 注意：这个接口比较慢，但可以作为 fallback
+            hk_df = ak.stock_hk_spot()
 
-            # 尝试获取个股信息
-            stock_info = ak.stock_individual_info_em(symbol=akshare_symbol)
+            if hk_df is None or hk_df.empty:
+                logger.warning(f"⚠️ [AKShare港股信息] 港股列表为空")
+                return {'symbol': symbol, 'name': f'港股{symbol}', 'source': 'akshare', 'market': '港股'}
 
-            if stock_info is not None and not stock_info.empty:
-                # 转换为字典格式
-                info = {'symbol': symbol, 'source': 'akshare'}
+            # 查找对应的股票
+            # 代码列可能是 '代码' 或 'symbol'
+            code_col = '代码' if '代码' in hk_df.columns else 'symbol'
 
-                # 提取股票名称
-                name_row = stock_info[stock_info['item'] == '股票简称']
-                if not name_row.empty:
-                    stock_name = name_row['value'].iloc[0]
-                    info['name'] = stock_name
-                    logger.info(f"✅ [AKShare股票信息] {symbol} -> {stock_name}")
-                else:
-                    info['name'] = f'股票{symbol}'
-                    logger.warning(f"⚠️ [AKShare股票信息] 未找到股票简称: {symbol}")
+            # 标准化查询代码（去掉前导零，然后补齐）
+            # AKShare 中港股代码格式：01810（带前导零的5位）
+            matched = hk_df[hk_df[code_col] == symbol]
 
-                # 提取其他信息
-                info['area'] = '未知'  # AKShare没有地区信息
-                info['industry'] = '未知'  # 可以通过其他API获取
-                info['market'] = '未知'  # 可以根据股票代码推断
-                info['list_date'] = '未知'  # 可以通过其他API获取
+            # 如果没找到，尝试去掉前导零再匹配
+            if matched.empty:
+                symbol_no_prefix = symbol.lstrip('0')
+                # 尝试匹配不带前导零的版本
+                for code in hk_df[code_col]:
+                    if str(code).lstrip('0') == symbol_no_prefix:
+                        matched = hk_df[hk_df[code_col] == code]
+                        break
 
-                return info
-            else:
-                logger.warning(f"⚠️ [AKShare股票信息] 返回空数据: {symbol}")
-                return {'symbol': symbol, 'name': f'股票{symbol}', 'source': 'akshare'}
+            if matched.empty:
+                logger.warning(f"⚠️ [AKShare港股信息] 未找到港股: {symbol}")
+                return {'symbol': symbol, 'name': f'港股{symbol}', 'source': 'akshare', 'market': '港股'}
+
+            # 提取信息
+            row = matched.iloc[0]
+
+            # 名称列可能是 '中文名称' 或 '名称' 或 'name'
+            name_col = '中文名称' if '中文名称' in hk_df.columns else ('名称' if '名称' in hk_df.columns else 'name')
+            stock_name = row.get(name_col, f'港股{symbol}')
+
+            info = {
+                'symbol': symbol,
+                'name': stock_name,
+                'source': 'akshare',
+                'market': '港股',
+                'area': '香港',
+                'industry': '未知',
+                'list_date': '未知',
+                'current_price': row.get('最新价', '未知'),
+                'change_pct': row.get('涨跌幅', '未知'),
+            }
+
+            logger.info(f"✅ [AKShare港股信息] {symbol} -> {stock_name}")
+            return info
 
         except Exception as e:
-            logger.error(f"❌ [股票信息] AKShare获取失败: {symbol}, 错误: {e}")
-            return {'symbol': symbol, 'name': f'股票{symbol}', 'source': 'akshare', 'error': str(e)}
+            logger.error(f"❌ [AKShare港股信息] 获取失败: {symbol}, 错误: {e}")
+            return {'symbol': symbol, 'name': f'港股{symbol}', 'source': 'akshare', 'market': '港股', 'error': str(e)}
 
     def _get_baostock_stock_info(self, symbol: str) -> Dict:
         """使用BaoStock获取股票基本信息"""

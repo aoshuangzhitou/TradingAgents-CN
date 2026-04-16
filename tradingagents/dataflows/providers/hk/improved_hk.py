@@ -8,10 +8,13 @@ import time
 import json
 import os
 import pandas as pd
+import numpy as np
+import yfinance as yf
 from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
-from tradingagents.config.runtime_settings import get_int
+from tradingagents.config.runtime_settings import get_int, get_float, get_timezone_name
 # 导入统一日志系统
 from tradingagents.utils.logging_init import get_logger
 logger = get_logger("default")
@@ -487,7 +490,11 @@ def get_hk_financial_indicators(symbol: str) -> Dict[str, Any]:
 # 兼容性函数：为了兼容旧的 akshare_utils 导入
 def get_hk_stock_data_akshare(symbol: str, start_date: str = None, end_date: str = None):
     """
-    兼容性函数：使用 AKShare 新浪财经接口获取港股历史数据
+    兼容性函数：获取港股历史数据
+
+    🔥 重要改进：使用 yfinance 作为主要数据源（实时数据）
+    - yfinance 数据来源：Yahoo Finance（实时更新）
+    - AKShare 数据来源：新浪财经（有约5天延迟）
 
     Args:
         symbol: 港股代码
@@ -498,7 +505,6 @@ def get_hk_stock_data_akshare(symbol: str, start_date: str = None, end_date: str
         港股数据（格式化字符串）
     """
     try:
-        import akshare as ak
         from datetime import datetime, timedelta
 
         # 标准化代码
@@ -506,47 +512,188 @@ def get_hk_stock_data_akshare(symbol: str, start_date: str = None, end_date: str
         normalized_symbol = provider._normalize_hk_symbol(symbol)
 
         # 设置默认日期
+        tz = ZoneInfo(get_timezone_name())
         if not end_date:
-            end_date = datetime.now().strftime('%Y-%m-%d')
+            end_date = datetime.now(tz).strftime('%Y-%m-%d')
         if not start_date:
-            start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
+            start_date = (datetime.now(tz) - timedelta(days=365)).strftime('%Y-%m-%d')
 
-        logger.info(f"🔄 [AKShare-新浪] 获取港股历史数据: {symbol} ({start_date} ~ {end_date})")
+        logger.info(f"🇭🇰 [yfinance实时] 获取港股历史数据: {symbol} ({start_date} ~ {end_date})")
 
-        # 使用新浪财经接口获取历史数据
-        df = ak.stock_hk_daily(symbol=normalized_symbol, adjust="qfq")
+        # 🔥 优先使用 yfinance 获取实时价格数据（与模拟交易一致）
+        try:
+            ticker = yf.Ticker(normalized_symbol)
+            df = ticker.history(start=start_date, end=end_date, timeout=60)
 
-        if df is None or df.empty:
-            logger.warning(f"⚠️ [AKShare-新浪] 返回空数据: {symbol}")
-            return f"❌ 无法获取港股{symbol}的历史数据"
+            if df is None or df.empty:
+                logger.warning(f"⚠️ [yfinance] 返回空数据: {symbol}, 尝试 AKShare 新浪备用...")
+                # 备用方案：使用 AKShare 新浪（有延迟，但更稳定）
+                import akshare as ak
+                df_ak = ak.stock_hk_daily(symbol=normalized_symbol, adjust="qfq")
 
-        # 过滤日期范围
-        df['date'] = pd.to_datetime(df['date'])
-        mask = (df['date'] >= start_date) & (df['date'] <= end_date)
-        df = df.loc[mask]
+                if df_ak is None or df_ak.empty:
+                    logger.warning(f"⚠️ [AKShare-新浪] 返回空数据: {symbol}")
+                    return f"❌ 无法获取港股{symbol}的历史数据"
+
+                # 使用 AKShare 数据（注意：有约5天延迟）
+                df_ak['date'] = pd.to_datetime(df_ak['date'])
+                mask = (df_ak['date'] >= start_date) & (df_ak['date'] <= end_date)
+                df_ak = df_ak.loc[mask]
+
+                # 重命名列以匹配 yfinance 格式
+                df = df_ak.rename(columns={
+                    'date': 'Date',
+                    'open': 'Open',
+                    'high': 'High',
+                    'low': 'Low',
+                    'close': 'Close',
+                    'volume': 'Volume'
+                })
+
+                logger.warning(f"⚠️ [港股数据源切换] yfinance 失败，使用 AKShare 新浪（可能有~5天延迟）")
+                data_source_note = "⚠️ 注意：使用新浪数据源，可能有约5天延迟"
+            else:
+                # yfinance 成功获取数据
+                df = df.reset_index()
+                df.columns = [col.capitalize() for col in df.columns]
+                # 确保列名正确
+                if 'Datetime' in df.columns:
+                    df = df.rename(columns={'Datetime': 'Date'})
+
+                # yfinance 返回的数据已经是实时数据
+                data_source_note = "✅ 数据来源：Yahoo Finance（实时更新）"
+                logger.info(f"✅ [yfinance实时] 港股数据获取成功: {symbol}, {len(df)}条记录")
+
+        except Exception as yf_error:
+            logger.warning(f"⚠️ [yfinance] 获取失败: {yf_error}, 尝试 AKShare 新浪备用...")
+
+            # 备用方案：使用 AKShare 新浪
+            import akshare as ak
+            df_ak = ak.stock_hk_daily(symbol=normalized_symbol, adjust="qfq")
+
+            if df_ak is None or df_ak.empty:
+                logger.warning(f"⚠️ [AKShare-新浪] 返回空数据: {symbol}")
+                return f"❌ 无法获取港股{symbol}的历史数据"
+
+            df_ak['date'] = pd.to_datetime(df_ak['date'])
+            mask = (df_ak['date'] >= start_date) & (df_ak['date'] <= end_date)
+            df_ak = df_ak.loc[mask]
+
+            # 重命名列
+            df = df_ak.rename(columns={
+                'date': 'Date',
+                'open': 'Open',
+                'high': 'High',
+                'low': 'Low',
+                'close': 'Close',
+                'volume': 'Volume'
+            })
+
+            data_source_note = "⚠️ 注意：使用新浪数据源，可能有约5天延迟"
 
         if df.empty:
-            logger.warning(f"⚠️ [AKShare-新浪] 日期范围内无数据: {symbol}")
+            logger.warning(f"⚠️ 港股数据为空: {symbol}")
             return f"❌ 港股{symbol}在指定日期范围内无数据"
 
-        # 🔥 添加 pre_close 字段（从前一天的 close 获取）
-        # AKShare 不返回 pre_close 字段，需要手动计算
-        df['pre_close'] = df['close'].shift(1)
+        # 🔥 额外获取今日实时价格（解决历史数据接口延迟问题）
+        realtime_price_data = None
+        try:
+            import akshare as ak
 
-        # 计算涨跌额和涨跌幅
-        df['change'] = df['close'] - df['pre_close']
-        df['pct_change'] = (df['change'] / df['pre_close'] * 100).round(2)
+            # 标准化代码为5位数字（AKShare stock_hk_spot 使用5位代码）
+            clean_code = normalized_symbol.replace('.HK', '').replace('.hk', '')
+            # 补齐到5位（AKShare stock_hk_spot 使用5位代码如 00700）
+            ak_spot_code = clean_code.lstrip('0') or '0'  # 移除前导0
+            ak_spot_code = ak_spot_code.zfill(5)  # 补齐到5位
+
+            logger.info(f"🔄 [实时行情] 获取港股实时价格: {ak_spot_code}")
+
+            spot_df = ak.stock_hk_spot()
+            matched = spot_df[spot_df['代码'] == ak_spot_code]
+
+            if not matched.empty:
+                spot_row = matched.iloc[0]
+                realtime_price_data = {
+                    'datetime': spot_row['日期时间'],
+                    'price': float(spot_row['最新价']) if spot_row['最新价'] else None,
+                    'open': float(spot_row['今开']) if spot_row['今开'] else None,
+                    'high': float(spot_row['最高']) if spot_row['最高'] else None,
+                    'low': float(spot_row['最低']) if spot_row['最低'] else None,
+                    'volume': int(spot_row['成交量']) if spot_row['成交量'] else None,
+                    'prev_close': float(spot_row['昨收']) if spot_row['昨收'] else None,
+                    'change': float(spot_row['涨跌额']) if spot_row['涨跌额'] else None,
+                    'change_pct': float(spot_row['涨跌幅']) if spot_row['涨跌幅'] else None
+                }
+                logger.info(f"✅ [实时行情] 获取成功: {symbol}, 最新价 HK${realtime_price_data['price']}, 时间 {realtime_price_data['datetime']}")
+
+                # 检查实时数据是否是今天的（比历史数据新鲜）
+                realtime_date_str = realtime_price_data['datetime'].split(' ')[0] if realtime_price_data['datetime'] else None
+                hist_latest_date = df.iloc[-1]['Date']
+                hist_latest_date_str = hist_latest_date.strftime('%Y-%m-%d') if hasattr(hist_latest_date, 'strftime') else str(hist_latest_date)
+
+                # 如果实时数据的日期比历史数据新，则添加到 DataFrame
+                if realtime_date_str and realtime_date_str > hist_latest_date_str:
+                    logger.info(f"🔥 [实时数据合并] 实时日期 {realtime_date_str} > 历史日期 {hist_latest_date_str}, 合合并今日实时数据")
+
+                    # 创建今日数据行
+                    today_row = pd.DataFrame({
+                        'Date': [pd.to_datetime(realtime_date_str)],
+                        'Open': [realtime_price_data['open']],
+                        'High': [realtime_price_data['high']],
+                        'Low': [realtime_price_data['low']],
+                        'Close': [realtime_price_data['price']],
+                        'Volume': [realtime_price_data['volume']],
+                        'pre_close': [realtime_price_data['prev_close']],
+                        'change': [realtime_price_data['change']],
+                        'pct_change': [realtime_price_data['change_pct']]
+                    })
+
+                    # 合并到 DataFrame
+                    df = pd.concat([df, today_row], ignore_index=True)
+                    logger.info(f"✅ [实时数据合并] 完成, DataFrame 现在有 {len(df)} 条记录")
+
+                    # 更新数据源说明
+                    data_source_note = f"✅ 数据来源：新浪实时行情（最新更新: {realtime_price_data['datetime']})"
+                else:
+                    logger.info(f"📊 [实时数据] 实时日期 {realtime_date_str} = 历史日期 {hist_latest_date_str}, 无需合并")
+
+            else:
+                logger.warning(f"⚠️ [实时行情] 未找到股票 {ak_spot_code} 的数据")
+
+        except Exception as e:
+            logger.warning(f"⚠️ [实时行情] 获取失败: {e}")
+            # 实时行情失败不影响整体数据返回
+
+        # 🔥 添加 pre_close 字段（从前一天的 close 获取，如果还没有）
+        if 'pre_close' not in df.columns:
+            df['pre_close'] = df['Close'].shift(1)
+
+        # 计算涨跌额和涨跌幅（如果还没有）
+        if 'change' not in df.columns:
+            df['change'] = df['Close'] - df['pre_close']
+        if 'pct_change' not in df.columns:
+            df['pct_change'] = (df['change'] / df['pre_close'] * 100).round(2)
 
         # 🔥 使用统一的技术指标计算函数
         from tradingagents.tools.analysis.indicators import add_all_indicators
-        df = add_all_indicators(df, close_col='close', high_col='high', low_col='low')
+        df = add_all_indicators(df, close_col='Close', high_col='High', low_col='Low')
 
         # 🔥 获取财务指标并计算 PE、PB
         financial_indicators = provider.get_financial_indicators(symbol)
 
         # 格式化输出（包含价格数据和技术指标）
         latest = df.iloc[-1]
-        current_price = latest['close']
+        current_price = latest['Close']
+
+        # 格式化日期显示
+        if 'Date' in latest:
+            latest_date = latest['Date']
+            if hasattr(latest_date, 'strftime'):
+                latest_date_str = latest_date.strftime('%Y-%m-%d')
+            else:
+                latest_date_str = str(latest_date)
+        else:
+            latest_date_str = df.index[-1].strftime('%Y-%m-%d') if hasattr(df.index[-1], 'strftime') else str(df.index[-1])
 
         # 计算 PE、PB
         pe_ratio = None
@@ -602,19 +749,45 @@ def get_hk_stock_data_akshare(symbol: str, start_date: str = None, end_date: str
 - 流动比率: {format_value(financial_indicators.get('current_ratio'))}
 """
 
+        # 格式化最近10天的数据
+        recent_data_df = df[['Date', 'Open', 'High', 'Low', 'Close', 'pre_close', 'change', 'pct_change', 'Volume']].tail(10).copy()
+        recent_data_df['Date'] = recent_data_df['Date'].apply(lambda x: x.strftime('%Y-%m-%d') if hasattr(x, 'strftime') else str(x))
+        recent_data_str = recent_data_df.to_string(index=False)
+
+        # 🔥 辅助函数：安全格式化数值（处理 NaN）
+        def safe_format(value, format_spec=".2f", prefix="", suffix="", default="N/A"):
+            """安全格式化数值，处理 NaN 和 None"""
+            if value is None or (isinstance(value, float) and value != value):  # NaN check
+                return default
+            try:
+                return f"{prefix}{value:{format_spec}}{suffix}"
+            except:
+                return default
+
+        def safe_format_int(value, prefix="", suffix="", default="N/A"):
+            """安全格式化整数，处理 NaN 和 None"""
+            if value is None or (isinstance(value, float) and value != value):  # NaN check
+                return default
+            try:
+                return f"{prefix}{int(value):,}{suffix}"
+            except:
+                return default
+
         result = f"""## 港股历史数据 ({symbol})
-**数据源**: AKShare (新浪财经)
+**数据源**: yfinance (Yahoo Finance) - 实时数据
+{data_source_note}
+**最新交易日**: {latest_date_str}
 **日期范围**: {start_date} ~ {end_date}
 **数据条数**: {len(df)} 条
 
 ### 最新价格信息
-- 最新价: HK${latest['close']:.2f}
-- 昨收: HK${latest['pre_close']:.2f}
-- 涨跌额: HK${latest['change']:.2f}
-- 涨跌幅: {latest['pct_change']:.2f}%
-- 最高: HK${latest['high']:.2f}
-- 最低: HK${latest['low']:.2f}
-- 成交量: {latest['volume']:,.0f}
+- 最新价: HK${latest['Close']:.2f}
+- 昨收: {safe_format(latest['pre_close'], prefix='HK$', default='N/A')}
+- 涨跌额: {safe_format(latest['change'], prefix='HK$', default='N/A')}
+- 涨跌幅: {safe_format(latest['pct_change'], suffix='%', default='N/A')}
+- 最高: HK${latest['High']:.2f}
+- 最低: HK${latest['Low']:.2f}
+- 成交量: {safe_format_int(latest['Volume'], default='N/A')}
 
 ### 技术指标（最新值）
 **移动平均线**:
@@ -637,20 +810,22 @@ def get_hk_stock_data_akshare(symbol: str, start_date: str = None, end_date: str
 - 下轨: HK${latest['boll_lower']:.2f}
 {financial_section}
 ### 最近10个交易日价格
-{df[['date', 'open', 'high', 'low', 'close', 'pre_close', 'change', 'pct_change', 'volume']].tail(10).to_string(index=False)}
+{recent_data_str}
 
 ### 数据统计
-- 最高价: HK${df['high'].max():.2f}
-- 最低价: HK${df['low'].min():.2f}
-- 平均收盘价: HK${df['close'].mean():.2f}
-- 总成交量: {df['volume'].sum():,.0f}
+- 最高价: HK${df['High'].max():.2f}
+- 最低价: HK${df['Low'].min():.2f}
+- 平均收盘价: HK${df['Close'].mean():.2f}
+- 总成交量: {safe_format_int(df['Volume'].sum(), default='N/A')}
 """
 
-        logger.info(f"✅ [AKShare-新浪] 港股历史数据获取成功: {symbol} ({len(df)}条)")
+        logger.info(f"✅ [港股实时数据] 港股历史数据获取成功: {symbol} ({len(df)}条), 最新日期: {latest_date_str}")
         return result
 
     except Exception as e:
-        logger.error(f"❌ [AKShare-新浪] 港股历史数据获取失败: {symbol} - {e}")
+        logger.error(f"❌ [港股实时数据] 港股历史数据获取失败: {symbol} - {e}")
+        import traceback
+        logger.error(f"❌ 异常堆栈: {traceback.format_exc()}")
         return f"❌ 港股{symbol}历史数据获取失败: {str(e)}"
 
 

@@ -3617,7 +3617,7 @@ class ConfigService:
             logger.info(f"🔍 [DashScope 测试] 使用模型: {model_name}")
 
             # 使用阿里云百炼的OpenAI兼容接口
-            url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+            url = "https://coding.dashscope.aliyuncs.com/v1/chat/completions"
 
             headers = {
                 "Content-Type": "application/json",

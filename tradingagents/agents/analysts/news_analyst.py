@@ -3,11 +3,13 @@ import time
 import json
 from datetime import datetime
 
-# 导入统一日志系统和分析模块日志装饰器
+# 导入统一新闻系统和分析模块日志装饰器
 from tradingagents.utils.logging_init import get_logger
 from tradingagents.utils.tool_logging import log_analyst_module
 # 导入统一新闻工具
 from tradingagents.tools.unified_news_tool import create_unified_news_tool
+# 导入宏观新闻工具
+from tradingagents.tools.macro_news_tool import create_macro_news_tool
 # 导入股票工具类
 from tradingagents.utils.stock_utils import StockUtils
 # 导入Google工具调用处理器
@@ -95,41 +97,47 @@ def create_news_analyst(llm, toolkit):
         company_name = _get_company_name(ticker, market_info)
         logger.info(f"[新闻分析师] 公司名称: {company_name}")
         
-        # 🔧 使用统一新闻工具，简化工具调用
-        logger.info(f"[新闻分析师] 使用统一新闻工具，自动识别股票类型并获取相应新闻")
-   # 创建统一新闻工具
+        # 🔧 使用统一新闻工具和宏观新闻工具，简化工具调用
+        logger.info(f"[新闻分析师] 使用统一新闻工具 + 宏观新闻工具")
+
+        # 创建统一新闻工具
         unified_news_tool = create_unified_news_tool(toolkit)
         unified_news_tool.name = "get_stock_news_unified"
-        
-        tools = [unified_news_tool]
-        logger.info(f"[新闻分析师] 已加载统一新闻工具: get_stock_news_unified")
+
+        # 创建宏观新闻工具
+        macro_news_tool = create_macro_news_tool(toolkit)
+        macro_news_tool.name = "get_macro_market_news"
+
+        tools = [unified_news_tool, macro_news_tool]
+        logger.info(f"[新闻分析师] 已加载工具: get_stock_news_unified, get_macro_market_news")
 
         system_message = (
             """您是一位专业的财经新闻分析师，负责分析最新的市场新闻和事件对股票价格的潜在影响。
 
 您的主要职责包括：
 1. 获取和分析最新的实时新闻（优先15-30分钟内的新闻）
-2. 评估新闻事件的紧急程度和市场影响
-3. 识别可能影响股价的关键信息
-4. 分析新闻的时效性和可靠性
-5. 提供基于新闻的交易建议和价格影响评估
+2. 获取宏观市场新闻，了解整体市场环境和宏观经济背景
+3. 评估新闻事件的紧急程度和市场影响
+4. 识别可能影响股价的关键信息
+5. 分析新闻的时效性和可靠性
+6. 提供基于新闻的交易建议和价格影响评估
 
 重点关注的新闻类型：
-- 财报发布和业绩指导
-- 重大合作和并购消息
-- 政策变化和监管动态
-- 突发事件和危机管理
-- 行业趋势和技术突破
-- 管理层变动和战略调整
+- **宏观层面**：货币政策、财政政策、经济数据（GDP、通胀、PMI）、国际形势
+- **行业层面**：行业政策、监管变化、行业趋势、竞争格局
+- **个股层面**：财报发布、业绩指导、重大合作、并购消息、管理层变动
 
 分析要点：
 - 新闻的时效性（发布时间距离现在多久）
 - 新闻的可信度（来源权威性）
+- 宏观因素对个股的传导路径分析
 - 市场影响程度（对股价的潜在影响）
 - 投资者情绪变化（正面/负面/中性）
 - 与历史类似事件的对比
 
 📊 新闻影响分析要求：
+- 评估宏观新闻对整体市场的影响（大盘走势、资金流向、板块轮动）
+- 分析宏观政策变化对个股所在行业的影响
 - 评估新闻对股价的短期影响（1-3天）和市场情绪变化
 - 分析新闻的利好/利空程度和可能的市场反应
 - 评估新闻对公司基本面和长期投资价值的影响
@@ -138,11 +146,13 @@ def create_news_analyst(llm, toolkit):
 - 不允许回复'无法评估影响'或'需要更多信息'
 
 请特别注意：
+⚠️ 必须同时调用两个工具：get_stock_news_unified（获取个股新闻）和 get_macro_market_news（获取宏观新闻）
 ⚠️ 如果新闻数据存在滞后（超过2小时），请在分析中明确说明时效性限制
 ✅ 优先分析最新的、高相关性的新闻事件
 📊 提供新闻对市场情绪和投资者信心的影响评估
 💰 必须包含基于新闻的市场反应预期和投资建议
 🎯 聚焦新闻内容本身的解读，不涉及技术指标分析
+🌐 必须分析宏观新闻对个股的间接影响（如政策传导、行业联动）
 
 请撰写详细的中文分析报告，并在报告末尾附上Markdown表格总结关键发现。"""
         )
@@ -161,17 +171,20 @@ def create_news_analyst(llm, toolkit):
                     "\n- 绝对禁止说'我无法获取实时数据'等借口"
                     "\n"
                     "\n✅ 强制执行步骤："
-                    "\n1. 您的第一个动作必须是调用 get_stock_news_unified 工具"
-                    "\n2. 该工具会自动识别股票类型（A股、港股、美股）并获取相应新闻"
-                    "\n3. 只有在成功获取新闻数据后，才能开始分析"
-                    "\n4. 您的回答必须基于工具返回的真实数据"
+                    "\n1. 您必须首先调用 get_stock_news_unified 工具获取个股新闻"
+                    "\n2. 您必须同时调用 get_macro_market_news 工具获取宏观市场新闻"
+                    "\n3. 该工具会自动识别股票类型（A股、港股、美股）并获取相应新闻"
+                    "\n4. 只有在成功获取新闻数据后，才能开始分析"
+                    "\n5. 您的回答必须基于工具返回的真实数据"
                     "\n"
                     "\n🔧 工具调用格式示例："
-                    "\n调用: get_stock_news_unified(stock_code='{ticker}', max_news=10)"
+                    "\n调用1: get_stock_news_unified(stock_code='{ticker}', max_news=10)"
+                    "\n调用2: get_macro_market_news(curr_date='{current_date}', max_news=15)"
                     "\n"
                     "\n⚠️ 如果您不调用工具，您的回答将被视为无效并被拒绝。"
-                    "\n⚠️ 您必须先调用工具获取数据，然后基于数据进行分析。"
+                    "\n⚠️ 您必须先调用两个工具获取数据，然后基于数据进行分析。"
                     "\n⚠️ 没有例外，没有借口，必须调用工具。"
+                    "\n⚠️ 宏观新闻分析是必须的，不能只分析个股新闻。"
                     "\n"
                     "\n您可以访问以下工具：{tool_names}。"
                     "\n{system_message}"
@@ -201,23 +214,36 @@ def create_news_analyst(llm, toolkit):
         
         # 🚨 DashScope/DeepSeek/Zhipu预处理：强制获取新闻数据
         pre_fetched_news = None
-        if ('DashScope' in llm.__class__.__name__ 
+        pre_fetched_macro_news = None
+        if ('DashScope' in llm.__class__.__name__
             or 'DeepSeek' in llm.__class__.__name__
             or 'Zhipu' in llm.__class__.__name__
             ):
             logger.warning(f"[新闻分析师] 🚨 检测到{llm.__class__.__name__}模型，启动预处理强制新闻获取...")
             try:
-                # 强制预先获取新闻数据
+                # 强制预先获取个股新闻数据
                 logger.info(f"[新闻分析师] 🔧 预处理：强制调用统一新闻工具...")
                 logger.info(f"[新闻分析师] 📊 调用参数: stock_code={ticker}, max_news=10, model_info={model_info}")
 
                 pre_fetched_news = unified_news_tool(stock_code=ticker, max_news=10, model_info=model_info)
 
-                logger.info(f"[新闻分析师] 📋 预处理返回结果长度: {len(pre_fetched_news) if pre_fetched_news else 0} 字符")
+                logger.info(f"[新闻分析师] 📋 预处理个股新闻结果长度: {len(pre_fetched_news) if pre_fetched_news else 0} 字符")
+
+                # 强制预先获取宏观新闻数据
+                logger.info(f"[新闻分析师] 🔧 预处理：强制调用宏观新闻工具...")
+                logger.info(f"[新闻分析师] 📊 调用参数: curr_date={current_date}, max_news=15")
+
+                pre_fetched_macro_news = macro_news_tool(curr_date=current_date, max_news=15)
+
+                logger.info(f"[新闻分析师] 📋 预处理宏观新闻结果长度: {len(pre_fetched_macro_news) if pre_fetched_macro_news else 0} 字符")
                 logger.info(f"[新闻分析师] 📄 预处理返回结果预览 (前500字符): {pre_fetched_news[:500] if pre_fetched_news else 'None'}")
 
-                if pre_fetched_news and len(pre_fetched_news.strip()) > 100:
-                    logger.info(f"[新闻分析师] ✅ 预处理成功获取新闻: {len(pre_fetched_news)} 字符")
+                # 检查是否成功获取了新闻（个股新闻或宏观新闻）
+                has_stock_news = pre_fetched_news and len(pre_fetched_news.strip()) > 100
+                has_macro_news = pre_fetched_macro_news and len(pre_fetched_macro_news.strip()) > 100
+
+                if has_stock_news or has_macro_news:
+                    logger.info(f"[新闻分析师] ✅ 预处理成功获取新闻: 个股新闻={len(pre_fetched_news) if has_stock_news else 0}字符, 宏观新闻={len(pre_fetched_macro_news) if has_macro_news else 0}字符")
 
                     # 直接基于预获取的新闻生成分析，跳过工具调用
                     # 🔧 重要：构建不包含工具调用指导的系统提示词
@@ -226,21 +252,29 @@ def create_news_analyst(llm, toolkit):
 您的职责是基于提供的新闻数据，对股票进行深入的新闻分析。
 
 分析要点：
-1. 总结最新的新闻事件和市场动态
-2. 分析新闻对股票的潜在影响
+1. 总结最新的新闻事件和市场动态（包括个股新闻和宏观新闻）
+2. 分析新闻对股票的潜在影响（包括宏观因素的间接影响）
 3. 评估市场情绪和投资者反应
 4. 提供基于新闻的投资建议
 
-重要说明：新闻数据已经为您提供，您无需调用任何工具，直接基于提供的数据进行分析。"""
+重要说明：
+- 新闻数据已经为您提供，您无需调用任何工具，直接基于提供的数据进行分析
+- 必须同时分析个股新闻和宏观市场新闻
+- 需要评估宏观政策变化对个股的影响路径"""
+
+                    # 组合新闻数据
+                    news_content = ""
+                    if has_stock_news:
+                        news_content += f"=== 个股新闻数据 ===\n{pre_fetched_news}\n\n"
+                    if has_macro_news:
+                        news_content += f"=== 宏观市场新闻 ===\n{pre_fetched_macro_news}\n\n"
 
                     enhanced_prompt = f"""请基于以下已获取的最新新闻数据，对股票 {ticker}（{company_name}）进行详细的新闻分析：
 
-=== 最新新闻数据 ===
-{pre_fetched_news}
-
+{news_content}
 请撰写详细的中文分析报告，包括：
-1. 新闻事件总结
-2. 对股票的影响分析
+1. 新闻事件总结（个股新闻 + 宏观新闻）
+2. 对股票的影响分析（直接影响 + 宏观因素间接影响）
 3. 市场情绪评估
 4. 投资建议"""
 
@@ -282,9 +316,11 @@ def create_news_analyst(llm, toolkit):
                         logger.warning(f"[新闻分析师] ⚠️ LLM返回结果为空，回退到标准模式")
 
                 else:
-                    logger.warning(f"[新闻分析师] ⚠️ 预处理获取新闻失败或内容过短（{len(pre_fetched_news) if pre_fetched_news else 0}字符），回退到标准模式")
-                    if pre_fetched_news:
-                        logger.warning(f"[新闻分析师] 📄 失败的新闻内容: {pre_fetched_news}")
+                        logger.warning(f"[新闻分析师] ⚠️ 预处理获取新闻失败：个股新闻长度={len(pre_fetched_news) if pre_fetched_news else 0}字符, 宏观新闻长度={len(pre_fetched_macro_news) if pre_fetched_macro_news else 0}字符，回退到标准模式")
+                        if pre_fetched_news:
+                            logger.warning(f"[新闻分析师] 📄 失败的个股新闻内容: {pre_fetched_news[:200]}")
+                        if pre_fetched_macro_news:
+                            logger.warning(f"[新闻分析师] 📄 失败的宏观新闻内容: {pre_fetched_macro_news[:200]}")
 
             except Exception as e:
                 logger.error(f"[新闻分析师] ❌ 预处理失败: {e}，回退到标准模式")
@@ -337,29 +373,47 @@ def create_news_analyst(llm, toolkit):
                 logger.warning(f"[新闻分析师] 📄 LLM原始响应内容 (前500字符): {result.content[:500] if hasattr(result, 'content') else 'No content'}")
 
                 try:
-                    # 强制获取新闻数据
-                    logger.info(f"[新闻分析师] 🔧 强制调用统一新闻工具获取新闻数据...")
+                    # 强制获取个股新闻数据
+                    logger.info(f"[新闻分析师] 🔧 强制调用统一新闻工具获取个股新闻数据...")
                     logger.info(f"[新闻分析师] 📊 调用参数: stock_code={ticker}, max_news=10")
 
                     forced_news = unified_news_tool(stock_code=ticker, max_news=10, model_info=model_info)
 
-                    logger.info(f"[新闻分析师] 📋 强制获取返回结果长度: {len(forced_news) if forced_news else 0} 字符")
+                    logger.info(f"[新闻分析师] 📋 强制获取个股新闻结果长度: {len(forced_news) if forced_news else 0} 字符")
+
+                    # 强制获取宏观新闻数据
+                    logger.info(f"[新闻分析师] 🔧 强制调用宏观新闻工具获取宏观市场新闻...")
+                    logger.info(f"[新闻分析师] 📊 调用参数: curr_date={current_date}, max_news=15")
+
+                    forced_macro_news = macro_news_tool(curr_date=current_date, max_news=15)
+
+                    logger.info(f"[新闻分析师] 📋 强制获取宏观新闻结果长度: {len(forced_macro_news) if forced_macro_news else 0} 字符")
                     logger.info(f"[新闻分析师] 📄 强制获取返回结果预览 (前500字符): {forced_news[:500] if forced_news else 'None'}")
 
-                    if forced_news and len(forced_news.strip()) > 100:
-                        logger.info(f"[新闻分析师] ✅ 强制获取新闻成功: {len(forced_news)} 字符")
+                    # 检查是否成功获取了新闻（个股新闻或宏观新闻）
+                    has_forced_stock_news = forced_news and len(forced_news.strip()) > 100
+                    has_forced_macro_news = forced_macro_news and len(forced_macro_news.strip()) > 100
+
+                    if has_forced_stock_news or has_forced_macro_news:
+                        logger.info(f"[新闻分析师] ✅ 强制获取新闻成功: 个股新闻={len(forced_news) if has_forced_stock_news else 0}字符, 宏观新闻={len(forced_macro_news) if has_forced_macro_news else 0}字符")
+
+                        # 组合新闻数据
+                        forced_news_content = ""
+                        if has_forced_stock_news:
+                            forced_news_content += f"=== 个股新闻数据 ===\n{forced_news}\n\n"
+                        if has_forced_macro_news:
+                            forced_news_content += f"=== 宏观市场新闻 ===\n{forced_macro_news}\n\n"
 
                         # 基于真实新闻数据重新生成分析
                         forced_prompt = f"""
 您是一位专业的财经新闻分析师。请基于以下最新获取的新闻数据，对股票 {ticker}（{company_name}）进行详细的新闻分析：
 
-=== 最新新闻数据 ===
-{forced_news}
-
+{forced_news_content}
 === 分析要求 ===
 {system_message}
 
 请基于上述真实新闻数据撰写详细的中文分析报告。
+必须同时分析个股新闻和宏观市场新闻对股票的影响。
 """
 
                         logger.info(f"[新闻分析师] 🔄 基于强制获取的新闻数据重新生成完整分析...")
@@ -375,9 +429,11 @@ def create_news_analyst(llm, toolkit):
                             logger.warning(f"[新闻分析师] ⚠️ 强制补救LLM返回为空，使用原始结果")
                             report = result.content if hasattr(result, 'content') else ""
                     else:
-                        logger.warning(f"[新闻分析师] ⚠️ 统一新闻工具获取失败或内容过短（{len(forced_news) if forced_news else 0}字符），使用原始结果")
+                        logger.warning(f"[新闻分析师] ⚠️ 强制获取新闻失败：个股新闻长度={len(forced_news) if forced_news else 0}字符, 宏观新闻长度={len(forced_macro_news) if forced_macro_news else 0}字符，使用原始结果")
                         if forced_news:
-                            logger.warning(f"[新闻分析师] 📄 失败的新闻内容: {forced_news}")
+                            logger.warning(f"[新闻分析师] 📄 失败的个股新闻内容: {forced_news[:200]}")
+                        if forced_macro_news:
+                            logger.warning(f"[新闻分析师] 📄 失败的宏观新闻内容: {forced_macro_news[:200]}")
                         report = result.content if hasattr(result, 'content') else ""
 
                 except Exception as e:

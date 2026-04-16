@@ -905,8 +905,25 @@ const toggleAnalyst = (analystName: string) => {
   }
 }
 
+// 提交冷却时间（防止双击）
+const SUBMIT_COOLDOWN = 3000 // 3秒冷却期
+const lastSubmitTime = ref(0)
+
 // 提交分析
 const submitAnalysis = async () => {
+  // 🔧 防重检查1：检查是否有正在运行的任务
+  if (analysisStatus.value === 'running') {
+    ElMessage.warning('已有分析任务正在运行，请等待完成后再提交新任务')
+    return
+  }
+
+  // 🔧 防重检查2：检查冷却期（防止双击）
+  const now = Date.now()
+  if (now - lastSubmitTime.value < SUBMIT_COOLDOWN) {
+    ElMessage.warning('请稍候再提交，避免重复请求')
+    return
+  }
+
   const stockCode = analysisForm.stockCode.trim()
   if (!stockCode) {
     ElMessage.warning('请输入股票代码')
@@ -929,6 +946,8 @@ const submitAnalysis = async () => {
     return
   }
 
+  // 🔧 记录提交时间（冷却期）
+  lastSubmitTime.value = now
   submitting.value = true
 
   try {
@@ -958,6 +977,48 @@ const submitAnalysis = async () => {
     console.log('🔍 分析响应数据:', response)
     console.log('🔍 响应数据结构:', response.data)
     console.log('🔍 任务ID:', response.data?.task_id)
+
+    // 🔧 处理重复任务（后端防重返回）
+    if (response.data?.is_duplicate) {
+      ElMessage.info({
+        message: `已存在相同股票的分析任务，正在跳转到现有任务...`,
+        duration: 3000
+      })
+
+      // 使用现有任务ID
+      currentTaskId.value = response.data.task_id
+
+      if (!currentTaskId.value) {
+        console.error('❌ 重复任务ID为空:', response)
+        ElMessage.error('任务ID获取失败，请重试')
+        return
+      }
+
+      console.log('✅ 使用现有任务ID:', currentTaskId.value)
+
+      // 保存任务状态到缓存
+      saveTaskToCache(currentTaskId.value, {
+        parameters: { ...analysisForm },
+        submitTime: new Date().toISOString()
+      })
+
+      // 显示进度（使用返回的进度信息）
+      analysisStatus.value = 'running'
+      showResults.value = false
+      progressInfo.value = {
+        progress: response.data.progress || 0,
+        currentStep: response.data.current_step || '正在分析...',
+        currentStepDescription: '正在恢复现有任务进度',
+        message: response.data.message || '已恢复现有任务',
+        elapsedTime: 0,
+        remainingTime: 0,
+        totalTime: 0
+      }
+
+      // 开始轮询任务状态
+      startPollingTaskStatus()
+      return
+    }
 
     ElMessage.success('分析任务已提交，正在处理中...')
 

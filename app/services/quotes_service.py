@@ -55,49 +55,94 @@ class QuotesService:
             return {c: q for c, q in self._cache.items() if c in codes and q}
 
     def _fetch_spot_akshare(self) -> Dict[str, Dict[str, Optional[float]]]:
-        """通过 AKShare 东方财富全市场快照接口拉取行情，并标准化为字典。
+        """通过 AKShare 获取全市场快照，并标准化为字典。
         预期列（常见）：代码、名称、最新价、涨跌幅、成交额。
         不同版本可能有差异，做多列名兼容。
+
+        🔥 优先使用东方财富接口，失败时回退到新浪接口
         """
+        result: Dict[str, Dict[str, Optional[float]]] = {}
+
+        # 1. 尝试东方财富接口（首选）
         try:
-            import akshare as ak  # 已在项目中使用，不额外安装
+            import akshare as ak
             df = ak.stock_zh_a_spot_em()
-            if df is None or getattr(df, "empty", True):
-                logger.warning("AKShare spot 返回空数据")
-                return {}
-            # 兼容常见列名
-            code_col = next((c for c in ["代码", "代码code", "symbol", "股票代码"] if c in df.columns), None)
-            price_col = next((c for c in ["最新价", "现价", "最新价(元)", "price", "最新"] if c in df.columns), None)
-            pct_col = next((c for c in ["涨跌幅", "涨跌幅(%)", "涨幅", "pct_chg"] if c in df.columns), None)
-            amount_col = next((c for c in ["成交额", "成交额(元)", "amount", "成交额(万元)"] if c in df.columns), None)
+            if df is not None and not getattr(df, "empty", True):
+                # 兼容常见列名
+                code_col = next((c for c in ["代码", "代码code", "symbol", "股票代码"] if c in df.columns), None)
+                price_col = next((c for c in ["最新价", "现价", "最新价(元)", "price", "最新"] if c in df.columns), None)
+                pct_col = next((c for c in ["涨跌幅", "涨跌幅(%)", "涨幅", "pct_chg"] if c in df.columns), None)
+                amount_col = next((c for c in ["成交额", "成交额(元)", "amount", "成交额(万元)"] if c in df.columns), None)
 
-            if not code_col or not price_col:
-                logger.error(f"AKShare spot 缺少必要列: code={code_col}, price={price_col}")
-                return {}
-
-            result: Dict[str, Dict[str, Optional[float]]] = {}
-            for _, row in df.iterrows():  # type: ignore
-                code_raw = row.get(code_col)
-                if not code_raw:
-                    continue
-                # 标准化股票代码：移除前导0，然后补齐到6位
-                code_str = str(code_raw).strip()
-                # 如果是纯数字，移除前导0后补齐到6位
-                if code_str.isdigit():
-                    code_clean = code_str.lstrip('0') or '0'  # 移除前导0，如果全是0则保留一个0
-                    code = code_clean.zfill(6)  # 补齐到6位
+                if code_col and price_col:
+                    for _, row in df.iterrows():
+                        code_raw = row.get(code_col)
+                        if not code_raw:
+                            continue
+                        code_str = str(code_raw).strip()
+                        if code_str.isdigit():
+                            code_clean = code_str.lstrip('0') or '0'
+                            code = code_clean.zfill(6)
+                        else:
+                            code = code_str.zfill(6)
+                        close = _safe_float(row.get(price_col))
+                        pct = _safe_float(row.get(pct_col)) if pct_col else None
+                        amt = _safe_float(row.get(amount_col)) if amount_col else None
+                        result[code] = {"close": close, "pct_chg": pct, "amount": amt}
+                    logger.info(f"✅ AKShare 东方财富 spot 拉取完成: {len(result)} 条")
+                    return result
                 else:
-                    code = code_str.zfill(6)
-                close = _safe_float(row.get(price_col))
-                pct = _safe_float(row.get(pct_col)) if pct_col else None
-                amt = _safe_float(row.get(amount_col)) if amount_col else None
-                # 若成交额单位为万元，统一转换为元（部分接口是万元，这里不强转，保持原样由前端展示单位）
-                result[code] = {"close": close, "pct_chg": pct, "amount": amt}
-            logger.info(f"AKShare spot 拉取完成: {len(result)} 条")
-            return result
+                    logger.warning(f"⚠️ 东方财富 spot 缺少必要列: code={code_col}, price={price_col}")
         except Exception as e:
-            logger.error(f"获取AKShare实时快照失败: {e}")
-            return {}
+            logger.warning(f"⚠️ 东方财富 spot 失败: {e}, 尝试新浪备用...")
+
+        # 2. 回退到新浪接口（代码格式：sz000001, sh600036）
+        try:
+            import akshare as ak
+            df = ak.stock_zh_a_spot()
+            if df is not None and not getattr(df, "empty", True):
+                code_col = next((c for c in ["代码", "代码code", "symbol", "股票代码"] if c in df.columns), None)
+                price_col = next((c for c in ["最新价", "现价", "最新价(元)", "price", "最新"] if c in df.columns), None)
+                pct_col = next((c for c in ["涨跌幅", "涨跌幅(%)", "涨幅", "pct_chg"] if c in df.columns), None)
+                amount_col = next((c for c in ["成交额", "成交额(元)", "amount", "成交额(万元)"] if c in df.columns), None)
+
+                if code_col and price_col:
+                    for _, row in df.iterrows():
+                        code_raw = row.get(code_col)
+                        if not code_raw:
+                            continue
+                        code_str = str(code_raw).strip().lower()
+
+                        # 🔥 新浪接口代码格式：sz000001, sh600036, bj920005
+                        # 需要去掉市场前缀，只保留6位数字代码
+                        if code_str.startswith('sz') or code_str.startswith('sh') or code_str.startswith('bj'):
+                            # 市场前缀格式：去掉前缀，保留纯数字
+                            pure_code = code_str[2:]  # 去掉前2位市场前缀
+                            if pure_code.isdigit():
+                                code_clean = pure_code.lstrip('0') or '0'
+                                code = code_clean.zfill(6)
+                            else:
+                                code = pure_code.zfill(6)
+                        elif code_str.isdigit():
+                            # 纯数字格式
+                            code_clean = code_str.lstrip('0') or '0'
+                            code = code_clean.zfill(6)
+                        else:
+                            # 其他格式，保留原样
+                            code = code_str
+
+                        close = _safe_float(row.get(price_col))
+                        pct = _safe_float(row.get(pct_col)) if pct_col else None
+                        amt = _safe_float(row.get(amount_col)) if amount_col else None
+                        result[code] = {"close": close, "pct_chg": pct, "amount": amt}
+                    logger.info(f"✅ AKShare 新浪 spot 拉取完成: {len(result)} 条")
+                    return result
+                else:
+                    logger.error(f"❌ 新浪 spot 缺少必要列: code={code_col}, price={price_col}")
+        except Exception as e:
+            logger.error(f"❌ 新浪 spot 也失败: {e}")
+
+        return result
 
 
 _quotes_service: Optional[QuotesService] = None

@@ -29,7 +29,7 @@ from app.models.notification import NotificationCreate
 from bson import ObjectId
 from app.core.database import get_mongo_db
 from app.services.config_service import ConfigService
-from app.services.memory_state_manager import get_memory_state_manager, TaskStatus
+from app.services.memory_state_manager import get_memory_state_manager, TaskStatus, TaskState
 from app.services.redis_progress_tracker import RedisProgressTracker, get_progress_by_id
 from app.services.progress_log_handler import register_analysis_tracker, unregister_analysis_tracker
 
@@ -670,6 +670,70 @@ class SimpleAnalysisService:
         self._stock_name_cache[code] = name
         return name
 
+    async def _find_running_task_in_memory(self, user_id: str, stock_code: str) -> Optional[TaskState]:
+        """在内存中查找用户的进行中任务
+
+        Args:
+            user_id: 用户ID
+            stock_code: 股票代码
+
+        Returns:
+            Optional[TaskState]: 如果存在进行中任务则返回任务状态，否则返回None
+        """
+        try:
+            # 获取内存中的所有任务
+            tasks = await self.memory_manager.get_all_tasks()
+
+            for task in tasks:
+                # 检查是否为同一用户、同一股票、且状态为 pending 或 running
+                if task.user_id == user_id and task.stock_code == stock_code:
+                    if task.status in [TaskStatus.PENDING, TaskStatus.RUNNING]:
+                        logger.info(f"🔍 [内存防重] 找到进行中任务: {task.task_id}, 状态={task.status.value}, 进度={task.progress}%")
+                        return task
+
+            return None
+        except Exception as e:
+            logger.error(f"❌ [内存防重] 查询失败: {e}")
+            return None
+
+    async def _find_running_task_in_mongo(self, user_id: str, stock_code: str) -> Optional[Dict[str, Any]]:
+        """在 MongoDB 中查找用户的进行中任务
+
+        Args:
+            user_id: 用户ID
+            stock_code: 股票代码
+
+        Returns:
+            Optional[Dict]: 如果存在进行中任务则返回任务信息，否则返回None
+        """
+        try:
+            db = get_mongo_db()
+
+            # 查询条件：同一用户、同一股票、状态为 pending 或 running
+            query = {
+                "user_id": user_id,
+                "$or": [
+                    {"stock_code": stock_code},
+                    {"stock_symbol": stock_code}
+                ],
+                "status": {"$in": ["pending", "running", "processing"]}
+            }
+
+            # 查找最近的一个进行中任务
+            existing_task = await db.analysis_tasks.find_one(
+                query,
+                sort=[("created_at", -1)]
+            )
+
+            if existing_task:
+                logger.info(f"🔍 [MongoDB防重] 找到进行中任务: {existing_task['task_id']}, 状态={existing_task.get('status')}")
+                return existing_task
+
+            return None
+        except Exception as e:
+            logger.error(f"❌ [MongoDB防重] 查询失败: {e}")
+            return None
+
     def _enrich_stock_names(self, tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """为任务列表补齐股票名称(就地更新)"""
         try:
@@ -732,15 +796,51 @@ class SimpleAnalysisService:
         user_id: str,
         request: SingleAnalysisRequest
     ) -> Dict[str, Any]:
-        """创建分析任务（立即返回，不执行分析）"""
-        try:
-            # 生成任务ID
-            task_id = str(uuid.uuid4())
+        """创建分析任务（立即返回，不执行分析）
 
+        🔧 防重处理：
+        - 检查用户是否已有相同股票的进行中任务（pending/running）
+        - 如果存在，返回已存在的任务信息，避免重复分析
+        """
+        try:
             # 🔧 使用 get_symbol() 方法获取股票代码（兼容 symbol 和 stock_code 字段）
             stock_code = request.get_symbol()
             if not stock_code:
                 raise ValueError("股票代码不能为空")
+
+            # 🔧 防重检查：检查内存中是否有相同用户、相同股票的进行中任务
+            logger.info(f"🔍 [防重检查] 开始检查用户 {user_id} 是否已有股票 {stock_code} 的进行中任务")
+
+            # 1. 检查内存中的任务
+            existing_memory_task = await self._find_running_task_in_memory(user_id, stock_code)
+            if existing_memory_task:
+                logger.warning(f"⚠️ [防重检查] 内存中已存在进行中任务: {existing_memory_task.task_id}")
+                return {
+                    "task_id": existing_memory_task.task_id,
+                    "status": existing_memory_task.status.value,
+                    "message": "已存在相同股票的进行中任务，返回现有任务",
+                    "is_duplicate": True,
+                    "progress": existing_memory_task.progress,
+                    "current_step": existing_memory_task.current_step
+                }
+
+            # 2. 检查 MongoDB 中的任务
+            existing_mongo_task = await self._find_running_task_in_mongo(user_id, stock_code)
+            if existing_mongo_task:
+                logger.warning(f"⚠️ [防重检查] MongoDB中已存在进行中任务: {existing_mongo_task['task_id']}")
+                return {
+                    "task_id": existing_mongo_task['task_id'],
+                    "status": existing_mongo_task['status'],
+                    "message": "已存在相同股票的进行中任务，返回现有任务",
+                    "is_duplicate": True,
+                    "progress": existing_mongo_task.get('progress', 0),
+                    "current_step": existing_mongo_task.get('status', 'pending')
+                }
+
+            logger.info(f"✅ [防重检查] 无重复任务，创建新任务")
+
+            # 生成任务ID
+            task_id = str(uuid.uuid4())
 
             logger.info(f"📝 创建分析任务: {task_id} - {stock_code}")
             logger.info(f"🔍 内存管理器实例ID: {id(self.memory_manager)}")

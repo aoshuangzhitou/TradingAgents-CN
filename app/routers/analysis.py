@@ -21,6 +21,8 @@ from app.models.analysis import (
     SingleAnalysisRequest, BatchAnalysisRequest, AnalysisParameters,
     AnalysisTaskResponse, AnalysisBatchResponse, AnalysisHistoryQuery
 )
+from fastapi.responses import StreamingResponse
+from app.core.database import get_redis_client
 
 router = APIRouter()
 logger = logging.getLogger("webapi")
@@ -1257,3 +1259,107 @@ async def delete_task(
     except Exception as e:
         logger.error(f"❌ 删除任务失败: {e}")
         raise HTTPException(status_code=500, detail=f"删除任务失败: {str(e)}")
+
+
+# ==================== SSE 流式进度接口 ====================
+
+async def task_progress_event_generator(task_id: str, user_id: str):
+    """为analysis router生成的SSE事件流"""
+    r = get_redis_client()
+    pubsub = None
+    channel = f"task_progress:{task_id}"
+
+    try:
+        # 加载动态SSE设置
+        try:
+            from app.services.config_provider import provider as config_provider
+            eff = await config_provider.get_effective_system_settings()
+            poll_timeout = float(eff.get("sse_poll_timeout_seconds", 1.0))
+            heartbeat_every = int(eff.get("sse_heartbeat_interval_seconds", 10))
+            max_idle_seconds = int(eff.get("sse_task_max_idle_seconds", 300))
+        except Exception:
+            from app.core.config import settings
+            poll_timeout = float(getattr(settings, "SSE_POLL_TIMEOUT_SECONDS", 1.0))
+            heartbeat_every = int(getattr(settings, "SSE_HEARTBEAT_INTERVAL_SECONDS", 10))
+            max_idle_seconds = int(getattr(settings, "SSE_TASK_MAX_IDLE_SECONDS", 300))
+
+        pubsub = r.pubsub()
+        logger.info(f"📡 [SSE-Analysis] 创建PubSub连接: task={task_id}, user={user_id}")
+
+        try:
+            await pubsub.subscribe(channel)
+            logger.info(f"✅ [SSE-Analysis] 订阅频道成功: {channel}")
+            yield f"event: connected\ndata: {{\"task_id\": \"{task_id}\", \"message\": \"已连接进度流\"}}\n\n"
+        except Exception as subscribe_error:
+            logger.error(f"❌ [SSE-Analysis] 订阅频道失败: {subscribe_error}")
+            try:
+                await pubsub.close()
+            except Exception:
+                pass
+            raise
+
+        idle_elapsed = 0.0
+        last_hb = time.monotonic()
+        import asyncio
+        import json
+
+        while idle_elapsed < max_idle_seconds:
+            try:
+                message = await asyncio.wait_for(pubsub.get_message(ignore_subscribe_messages=True), timeout=poll_timeout)
+                if message and message['type'] == 'message':
+                    idle_elapsed = 0.0
+                    try:
+                        progress_data = json.loads(message['data'])
+                        yield f"event: progress\ndata: {json.dumps(progress_data, ensure_ascii=False)}\n\n"
+                    except json.JSONDecodeError:
+                        logger.warning(f"[SSE-Analysis] 无效的JSON消息: {message['data']}")
+                else:
+                    idle_elapsed += poll_timeout
+                    now = time.monotonic()
+                    if now - last_hb >= heartbeat_every:
+                        yield f"event: heartbeat\ndata: {{\"timestamp\": {time.time()}}}\n\n"
+                        last_hb = now
+            except asyncio.TimeoutError:
+                idle_elapsed += poll_timeout
+                continue
+
+    except Exception as e:
+        logger.exception(f"[SSE-Analysis] 任务 {task_id} 发生错误: {e}")
+        yield f"event: error\ndata: {{\"error\": \"连接异常: {str(e)}\"}}\n\n"
+    finally:
+        if pubsub:
+            logger.info(f"🧹 [SSE-Analysis] 清理PubSub连接: task={task_id}")
+            try:
+                await pubsub.unsubscribe(channel)
+            except Exception:
+                pass
+            try:
+                await pubsub.close()
+            except Exception:
+                pass
+
+
+@router.get("/tasks/{task_id}/stream")
+async def stream_task_progress_analysis(
+    task_id: str,
+    user: dict = Depends(get_current_user),
+    svc: QueueService = Depends(get_queue_service)
+):
+    """流式获取任务进度 (SSE endpoint)
+
+    提供/analysis路由下的SSE端点，兼容/api/stream/tasks/{task_id}
+    """
+    # 验证任务存在且属于当前用户
+    task_data = await svc.get_task(task_id)
+    if not task_data or task_data.get("user") != user["id"]:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    return StreamingResponse(
+        task_progress_event_generator(task_id, user["id"]),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"  # 禁用nginx缓冲
+        }
+    )

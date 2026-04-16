@@ -39,6 +39,192 @@ def create_msg_delete():
     return delete_messages
 
 
+# ==================== 数据获取错误处理辅助函数 ====================
+
+def _is_data_fetch_failed(data: str) -> bool:
+    """
+    检测数据获取是否失败
+
+    Args:
+        data: 数据返回内容
+
+    Returns:
+        bool: True 表示获取失败，False 表示成功
+    """
+    if not data:
+        return True
+
+    # 检查常见的错误标记
+    error_markers = [
+        "❌",
+        "获取失败",
+        "无法获取",
+        "数据获取失败",
+        "所有启用的数据源都不可用",
+        "返回空数据",
+        "未获取到数据",
+        "Error:",
+        "Exception:",
+        "不存在",
+        "无数据",
+        "数据为空",
+    ]
+
+    for marker in error_markers:
+        if marker in data:
+            return True
+
+    # 检查是否有实际的价格数据（最低限度的有效数据）
+    # 如果数据中没有数字价格信息，也认为是失败的
+    import re
+    # 检查是否包含价格格式（如：¥123.45 或 HK$45.50 或 $190.00）
+    price_patterns = [
+        r'[¥$HK][\s]*[\d]+[\.\d]*',  # 货币符号+数字
+        r'[\d]+[\.\d]*[\s]*(元|美元|港元)',  # 数字+货币单位
+        r'(最新价|当前价|收盘价)[：:][\s]*[\d]+',  # 价格标签+数字
+    ]
+
+    has_price_data = False
+    for pattern in price_patterns:
+        if re.search(pattern, data):
+            has_price_data = True
+            break
+
+    # 如果没有价格数据，认为数据获取失败
+    if not has_price_data and len(data) < 200:
+        return True
+
+    return False
+
+
+def _create_data_error_message(market_type: str, ticker: str, error_detail: str, market_info: dict) -> str:
+    """
+    创建数据获取失败时的错误消息（包含明确的LLM处理指令，防止幻觉）
+
+    Args:
+        market_type: 市场类型（A股/港股/美股）
+        ticker: 股票代码
+        error_detail: 错误详情
+        market_info: 市场信息字典
+
+    Returns:
+        str: 格式化的错误消息
+    """
+    # 提取货币信息
+    currency_name = market_info.get('currency_name', '未知')
+    currency_symbol = market_info.get('currency_symbol', '?')
+
+    error_msg = f"""## {market_type}市场数据
+
+═══════════════════════════════════════════════════════════════
+⚠️  **DATA_FETCH_FAILED** - 数据获取失败标记
+═══════════════════════════════════════════════════════════════
+
+**股票代码**: {ticker}
+**所属市场**: {market_type}
+**计价货币**: {currency_name} ({currency_symbol})
+**错误详情**: {error_detail[:200] if len(error_detail) > 200 else error_detail}
+
+---
+
+### 🔴 LLM处理指令（必须严格遵守）：
+
+1. **禁止编造数据**: 不得编造任何价格、成交量、技术指标数值
+2. **禁止给出投资建议**: 不得给出买入/卖出/持有建议或目标价位
+3. **报告状态**: 必须明确标注"数据获取失败，无法进行技术分析"
+4. **建议操作**: 建议用户检查股票代码格式或稍后重试
+
+---
+
+### ✅ 允许输出格式：
+
+# {ticker} 技术分析报告 - 数据获取失败
+
+## 一、数据状态
+- **状态**: 数据获取失败，无法进行技术分析
+- **原因**: [从错误详情中提取关键信息]
+- **股票代码**: {ticker}
+- **所属市场**: {market_type}
+
+## 二、排查建议
+1. 检查股票代码格式是否正确
+   - {market_type}代码格式：{'5位数字（如 00700）' if market_type == '港股' else '字母代码（如 AAPL）' if market_type == '美股' else '6位数字（如 000001）'}
+2. 确认该股票是否在{market_type}市场交易
+3. 稍后重试或联系管理员检查数据源配置
+
+## 三、决策建议
+- ⚠️ 当前不建议进行任何交易决策
+- ⚠️ 请等待数据正常后再进行分析
+
+---
+
+**禁止输出任何具体数值、价格、技术指标或投资建议！**
+═══════════════════════════════════════════════════════════════
+"""
+    return error_msg
+
+
+def _create_fundamentals_error_message(market_type: str, ticker: str, error_detail: str, market_info: dict) -> str:
+    """
+    创建基本面数据获取失败时的错误消息（用于基本面分析工具）
+
+    Args:
+        market_type: 市场类型（A股/港股/美股）
+        ticker: 股票代码
+        error_detail: 错误详情
+        market_info: 市场信息字典
+
+    Returns:
+        str: 格式化的错误消息
+    """
+    currency_name = market_info.get('currency_name', '未知')
+    currency_symbol = market_info.get('currency_symbol', '?')
+
+    error_msg = f"""## {market_type}基本面数据
+
+═══════════════════════════════════════════════════════════════
+⚠️  **FUNDAMENTALS_DATA_FETCH_FAILED** - 基本面数据获取失败标记
+═══════════════════════════════════════════════════════════════
+
+**股票代码**: {ticker}
+**所属市场**: {market_type}
+**计价货币**: {currency_name} ({currency_symbol})
+**错误详情**: {error_detail[:200] if len(error_detail) > 200 else error_detail}
+
+---
+
+### 🔴 LLM处理指令（基本面分析专用）：
+
+1. **禁止编造财务数据**: 不得编造PE、PB、ROE、EPS等任何财务指标数值
+2. **禁止编造估值判断**: 不得给出"估值偏低/偏高"等主观判断
+3. **禁止给出投资建议**: 基本面分析无法完成时，不得给出投资建议
+4. **报告状态**: 必须明确标注"基本面数据获取失败，无法完成基本面分析"
+
+---
+
+### ✅ 允许输出格式：
+
+## {market_type}基本面分析 - 数据获取失败
+
+**状态**: 基本面数据获取失败，无法完成基本面分析
+**原因**: [从错误详情中提取关键信息]
+
+**排查建议**:
+1. 检查股票代码格式是否正确
+2. 确认该股票是否在{market_type}市场交易
+3. 稍后重试或联系管理员检查数据源配置
+
+**决策建议**: ⚠️ 当前不建议基于基本面进行任何投资决策
+
+---
+
+**禁止输出任何PE、PB、ROE、EPS、营收、利润等财务指标数值！**
+**禁止输出"估值合理"、"基本面良好"等主观判断！**
+═══════════════════════════════════════════════════════════════
+"""
+    return error_msg
+
+
 class Toolkit:
     _config = DEFAULT_CONFIG.copy()
 
@@ -536,6 +722,46 @@ class Toolkit:
         return openai_news_results
 
     @staticmethod
+    @tool
+    def get_macro_market_news(
+        curr_date: Annotated[str, "Current date in yyyy-mm-dd format"],
+        max_news: Annotated[int, "Maximum number of news items to retrieve, default 15"] = 15,
+    ) -> str:
+        """
+        获取宏观市场新闻（CCTV财经、东方财富全球资讯）
+        整合多个权威数据源，提供影响整体市场的宏观经济新闻
+        包括货币政策、财政政策、经济数据、国际形势等重要信息
+
+        Args:
+            curr_date (str): 当前日期，格式为 yyyy-mm-dd
+            max_news (int): 最大新闻数量，默认15条
+
+        Returns:
+            str: 包含CCTV财经新闻、东方财富全球资讯的格式化报告
+        """
+        logger.info(f"🌍 [宏观新闻工具] 获取宏观市场新闻，日期: {curr_date}")
+
+        try:
+            from tradingagents.tools.macro_news_tool import create_macro_news_tool
+
+            # 创建宏观新闻工具实例
+            macro_tool = create_macro_news_tool(toolkit=None)  # toolkit参数在静态方法中为None
+
+            # 获取宏观新闻
+            macro_news = macro_tool(curr_date, max_news)
+
+            logger.info(f"🌍 [宏观新闻工具] 结果长度: {len(macro_news)} 字符")
+
+            return macro_news
+
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            logger.error(f"❌ [宏观新闻工具] 获取失败: {str(e)}")
+            logger.error(f"❌ [宏观新闻工具] 堆栈: {error_details}")
+            return f"宏观市场新闻获取失败: {str(e)}"
+
+    @staticmethod
     # @tool  # 已移除：请使用 get_stock_fundamentals_unified
     def get_fundamentals_openai(
         ticker: Annotated[str, "the company's ticker"],
@@ -915,59 +1141,23 @@ class Toolkit:
                     logger.info(f"🔍 [基本面工具调试] 港股数据返回长度: {len(hk_data)}")
                     logger.info(f"🔍 [基本面工具调试] 港股数据前500字符:\n{hk_data[:500]}")
 
-                    # 检查数据质量
-                    if hk_data and len(hk_data) > 100 and "❌" not in hk_data:
+                    # 🔥 增强错误检测：检查数据是否获取失败
+                    if _is_data_fetch_failed(hk_data):
+                        logger.warning(f"⚠️ [统一基本面工具] 港股数据获取失败，使用错误提示")
+                        result_data.append(_create_fundamentals_error_message("港股", ticker, hk_data, market_info))
+                    else:
                         result_data.append(f"## 港股数据\n{hk_data}")
                         hk_data_success = True
-                        logger.info(f"✅ [统一基本面工具] 港股主要数据源成功")
-                    else:
-                        logger.warning(f"⚠️ [统一基本面工具] 港股主要数据源质量不佳")
+                        logger.info(f"✅ [统一基本面工具] 港股数据获取成功")
 
                 except Exception as e:
                     logger.error(f"❌ [基本面工具调试] 港股数据获取失败: {e}")
+                    result_data.append(_create_fundamentals_error_message("港股", ticker, str(e), market_info))
 
-                # 备用方案：基础港股信息
+                # 🔥 移除备用方案：当数据获取失败时，不应提供模糊信息给LLM
+                # 原备用方案会返回基础港股信息，这可能导致LLM幻觉编造数据
                 if not hk_data_success:
-                    try:
-                        from tradingagents.dataflows.interface import get_hk_stock_info_unified
-                        hk_info = get_hk_stock_info_unified(ticker)
-
-                        basic_info = f"""## 港股基础信息
-
-**股票代码**: {ticker}
-**股票名称**: {hk_info.get('name', f'港股{ticker}')}
-**交易货币**: 港币 (HK$)
-**交易所**: 香港交易所 (HKG)
-**数据源**: {hk_info.get('source', '基础信息')}
-
-⚠️ 注意：详细的价格和财务数据暂时无法获取，建议稍后重试或使用其他数据源。
-
-**基本面分析建议**：
-- 建议查看公司最新财报
-- 关注港股市场整体走势
-- 考虑汇率因素对投资的影响
-"""
-                        result_data.append(basic_info)
-                        logger.info(f"✅ [统一基本面工具] 港股备用信息成功")
-
-                    except Exception as e2:
-                        # 最终备用方案
-                        fallback_info = f"""## 港股信息（备用）
-
-**股票代码**: {ticker}
-**股票类型**: 港股
-**交易货币**: 港币 (HK$)
-**交易所**: 香港交易所 (HKG)
-
-❌ 数据获取遇到问题: {str(e2)}
-
-**建议**：
-- 请稍后重试
-- 或使用其他数据源
-- 检查股票代码格式是否正确
-"""
-                        result_data.append(fallback_info)
-                        logger.error(f"❌ [统一基本面工具] 港股所有数据源都失败: {e2}")
+                    logger.warning(f"⚠️ [统一基本面工具] 港股数据获取失败，已添加错误提示，不再尝试备用方案")
 
             else:
                 # 美股：使用OpenAI/Finnhub数据源
@@ -1096,10 +1286,15 @@ class Toolkit:
                     logger.info(f"🔍 [市场工具调试] A股数据返回长度: {len(stock_data)}")
                     logger.info(f"🔍 [市场工具调试] A股数据前500字符:\n{stock_data[:500]}")
 
-                    result_data.append(f"## A股市场数据\n{stock_data}")
+                    # 🔥 增强错误检测：检查数据是否包含错误标记
+                    if _is_data_fetch_failed(stock_data):
+                        logger.warning(f"⚠️ [市场工具调试] A股数据获取失败，返回错误提示")
+                        result_data.append(_create_data_error_message("A股", ticker, stock_data, market_info))
+                    else:
+                        result_data.append(f"## A股市场数据\n{stock_data}")
                 except Exception as e:
                     logger.error(f"❌ [市场工具调试] A股数据获取失败: {e}")
-                    result_data.append(f"## A股市场数据\n获取失败: {e}")
+                    result_data.append(_create_data_error_message("A股", ticker, str(e), market_info))
 
             elif is_hk:
                 # 港股：使用AKShare数据源
@@ -1113,10 +1308,15 @@ class Toolkit:
                     logger.info(f"🔍 [市场工具调试] 港股数据返回长度: {len(hk_data)}")
                     logger.info(f"🔍 [市场工具调试] 港股数据前500字符:\n{hk_data[:500]}")
 
-                    result_data.append(f"## 港股市场数据\n{hk_data}")
+                    # 🔥 增强错误检测：检查数据是否包含错误标记
+                    if _is_data_fetch_failed(hk_data):
+                        logger.warning(f"⚠️ [市场工具调试] 港股数据获取失败，返回错误提示")
+                        result_data.append(_create_data_error_message("港股", ticker, hk_data, market_info))
+                    else:
+                        result_data.append(f"## 港股市场数据\n{hk_data}")
                 except Exception as e:
                     logger.error(f"❌ [市场工具调试] 港股数据获取失败: {e}")
-                    result_data.append(f"## 港股市场数据\n获取失败: {e}")
+                    result_data.append(_create_data_error_message("港股", ticker, str(e), market_info))
 
             else:
                 # 美股：优先使用FINNHUB API数据源
@@ -1125,9 +1325,16 @@ class Toolkit:
                 try:
                     from tradingagents.dataflows.providers.us.optimized import get_us_stock_data_cached
                     us_data = get_us_stock_data_cached(ticker, start_date, end_date)
-                    result_data.append(f"## 美股市场数据\n{us_data}")
+
+                    # 🔥 增强错误检测：检查数据是否包含错误标记
+                    if _is_data_fetch_failed(us_data):
+                        logger.warning(f"⚠️ [市场工具调试] 美股数据获取失败，返回错误提示")
+                        result_data.append(_create_data_error_message("美股", ticker, us_data, market_info))
+                    else:
+                        result_data.append(f"## 美股市场数据\n{us_data}")
                 except Exception as e:
-                    result_data.append(f"## 美股市场数据\n获取失败: {e}")
+                    logger.error(f"❌ [市场工具调试] 美股数据获取失败: {e}")
+                    result_data.append(_create_data_error_message("美股", ticker, str(e), market_info))
 
             # 组合所有数据
             combined_result = f"""# {ticker} 市场数据分析

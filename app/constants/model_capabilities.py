@@ -101,7 +101,7 @@ DEFAULT_MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {
         "performance_metrics": {"speed": 5, "cost": 5, "quality": 3},
         "description": "通义千问轻量版，快速响应，适合数据收集"
     },
-    "qwen-plus": {
+    "MiniMax-M2.5": {
         "capability_level": 2,
         "suitable_roles": [ModelRole.BOTH],
         "features": [ModelFeature.TOOL_CALLING, ModelFeature.LONG_CONTEXT],
@@ -109,7 +109,7 @@ DEFAULT_MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {
         "performance_metrics": {"speed": 4, "cost": 4, "quality": 4},
         "description": "通义千问标准版，平衡性能和成本"
     },
-    "qwen-max": {
+    "glm-5": {
         "capability_level": 4,
         "suitable_roles": [ModelRole.BOTH],
         "features": [ModelFeature.TOOL_CALLING, ModelFeature.LONG_CONTEXT, ModelFeature.REASONING],
@@ -117,7 +117,7 @@ DEFAULT_MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {
         "performance_metrics": {"speed": 3, "cost": 2, "quality": 5},
         "description": "通义千问旗舰版，强大推理能力"
     },
-    "qwen3-max": {
+    "qwen3.5-max": {
         "capability_level": 5,
         "suitable_roles": [ModelRole.DEEP_ANALYSIS],
         "features": [ModelFeature.TOOL_CALLING, ModelFeature.LONG_CONTEXT, ModelFeature.REASONING],
