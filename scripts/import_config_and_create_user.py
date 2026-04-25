@@ -46,7 +46,7 @@ def load_env_config(script_dir: Path) -> dict:
         'mongodb_port': 27017,  # 默认端口
         'mongodb_host': 'localhost',
         'mongodb_username': 'admin',
-        'mongodb_password': 'Chenghongjulv',
+        'mongodb_password': 'tradingagents',
         'mongodb_database': 'tradingagents'
     }
 
