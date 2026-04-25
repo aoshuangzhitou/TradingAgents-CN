@@ -87,8 +87,8 @@ DB_NAME = "tradingagents"
 
 # 默认管理员用户
 DEFAULT_ADMIN = {
-    "username": "aushuangzhitou",
-    "password": "Chenghuangjulv",
+    "username": "",
+    "password": "",
     "email": "admin@tradingagents.cn"
 }
 
